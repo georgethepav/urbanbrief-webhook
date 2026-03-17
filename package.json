@@ -1,0 +1,15 @@
+{
+  "name": "urbanbrief-webhook",
+  "version": "1.0.0",
+  "description": "UrbanBrief Phase 2 — Stripe webhook, AI report generation, PDF delivery",
+  "dependencies": {
+    "stripe": "^14.0.0",
+    "googleapis": "^140.0.0",
+    "resend": "^3.0.0",
+    "openai": "^4.0.0",
+    "pdfkit": "^0.15.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

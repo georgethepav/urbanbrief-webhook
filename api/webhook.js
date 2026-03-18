@@ -42,7 +42,7 @@ export default async function handler(req, res) {
 
     const tool = (estimate['Tool'] || estimate['tool'] || 'renovation').toLowerCase();
     const reportContent = await generateReport(estimate, extra, tool);
-    const pdfBuffer = await generatePDF(reportContent, estimate, tool);
+    const pdfBuffer = await generatePDF(reportContent, estimate, tool, extra);
     await sendReportEmail(email, pdfBuffer, tool, reportContent, estimate);
     await markAsPaid(email);
 
@@ -125,7 +125,7 @@ Return this JSON:
 
 // ── PDF ───────────────────────────────────────────────────────────────────────
 
-async function generatePDF(report, estimate, tool) {
+async function generatePDF(report, estimate, tool, extra) {
   // Fetch the UB logo from GitHub as base64
   let logoBase64 = null;
   try {

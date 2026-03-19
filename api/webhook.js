@@ -81,6 +81,44 @@ async function markAsPaid(email) {
 
 function toTitle(s) {
   if (!s) return '';
+  // Expand known shorthand values first
+  const expansions = {
+    'semi':        'Semi-detached',
+    'detached':    'Detached',
+    'terrace':     'Terraced',
+    'bungalow':    'Bungalow',
+    'flat':        'Flat',
+    'london':      'London',
+    'south_east':  'South East',
+    'midlands':    'Midlands',
+    'north':       'North England',
+    'scotland':    'Scotland',
+    'wales':       'Wales',
+    'basic':       'Basic',
+    'midrange':    'Mid-range',
+    'highspec':    'High Spec',
+    'luxury':      'Luxury',
+    'cosmetic':    'Cosmetic Refresh',
+    'full':        'Full Renovation',
+    'full_layout': 'Full + Layout Changes',
+    'full_ext':    'Full + Extension',
+    'pre1920':     'Pre-1920',
+    '1920_1960':   '1920–1960',
+    '1960_1990':   '1960–1990',
+    '1990_2010':   '1990–2010',
+    '2010plus':    '2010+',
+    'rear_single': 'Rear Single-Storey',
+    'rear_two':    'Rear Two-Storey',
+    'sides_single':'Two+ Sides Single-Storey',
+    'sides_two':   'Two+ Sides Two-Storey',
+    'loft':        'Loft Conversion',
+    'sub80':       'Under 80m²',
+    '80_120':      '80–120m²',
+    '120_160':     '120–160m²',
+    '160plus':     '160m²+',
+  };
+  const lower = String(s).toLowerCase().trim();
+  if (expansions[lower]) return expansions[lower];
   return String(s)
     .replace(/_/g, ' ')
     .replace(/([a-z])([A-Z])/g, '$1 $2')
@@ -98,10 +136,12 @@ function fmtPound(v) {
 function get(obj, ...keys) {
   if (!obj) return '';
   for (const k of keys) {
-    if (obj[k] !== undefined && obj[k] !== '') return String(obj[k]);
-    const lk = k.toLowerCase().replace(/[\s/_]/g, '');
-    const match = Object.keys(obj).find(ok => ok.toLowerCase().replace(/[\s/_]/g, '') === lk);
-    if (match && obj[match] !== '') return String(obj[match]);
+    // Exact match first
+    if (obj[k] !== undefined && obj[k] !== null && obj[k] !== '') return String(obj[k]);
+    // Normalised match (strips spaces, underscores, slashes, hyphens)
+    const lk = k.toLowerCase().replace(/[\s/_\-]/g, '');
+    const match = Object.keys(obj).find(ok => ok.toLowerCase().replace(/[\s/_\-]/g, '') === lk);
+    if (match !== undefined && obj[match] !== undefined && obj[match] !== null && obj[match] !== '') return String(obj[match]);
   }
   return '';
 }
@@ -200,7 +240,7 @@ async function generatePDF(report, estimate, tool, extra) {
 
     // ── PAGE HELPERS ──────────────────────────────────────────────────────
     let pageNum = 0;
-    const TOTAL = 12; // estimated
+    let TOTAL_PAGES = 0; // counted on first pass — updated via closure
 
     function newPage() {
       pageNum++;
@@ -233,7 +273,7 @@ async function generatePDF(report, estimate, tool, extra) {
            .text(address, M, 12, { width: INN, align: 'right' });
       }
       doc.fontSize(6.5).font('Helvetica').fillColor(MUTED)
-         .text(`Prepared for: ${client}  ·  Page ${pageNum} of ${TOTAL}`, M, 24, { width: INN, align: 'right' });
+         .text('Prepared for: ' + client + '  ·  Page ' + pageNum, M, 24, { width: INN, align: 'right' });
 
       // Footer bar
       doc.rect(0, H-34, W, 34).fill(CARD);
@@ -255,14 +295,18 @@ async function generatePDF(report, estimate, tool, extra) {
     let y = CONTENT_TOP;
 
     function checkY(needed = 60) {
-      if (y + needed > MAX_Y) { newSec(null, null); }
+      if (y + needed > MAX_Y) {
+        newPage();
+        y = CONTENT_TOP + 8;
+      }
     }
 
     function newSec(num, title) {
       newPage();
       y = CONTENT_TOP + 8;
       if (num && title) {
-        doc.fontSize(15).font('Helvetica-Bold').fillColor(WHITE).text(`${num}.  ${title}`, M, y);
+        doc.fontSize(15).font('Helvetica-Bold').fillColor(WHITE)
+           .text(num + '.  ' + title, M, y);
         y += 22;
         doc.rect(M, y, INN, 0.5).fill(BORD);
         y += 8;
@@ -376,27 +420,27 @@ async function generatePDF(report, estimate, tool, extra) {
     // ══════════════════════════════════════════════════════════════════════
     newPage();
 
-    // Logo
+    // Logo — large, top right on cover
     if (logoBase64) {
-      try { doc.image(logoBase64, M, 20, { width: 20, height: 17 }); } catch(e) {}
+      try { doc.image(logoBase64, W-M-48, 16, { width: 48, height: 40.8 }); } catch(e) {}
     }
 
     // Tag + title
     doc.fontSize(8).font('Helvetica-Bold').fillColor(TEAL)
        .text('INTELLIGENCE REPORT', M, 46, { characterSpacing: 1.8 });
     doc.fontSize(26).font('Helvetica-Bold').fillColor(WHITE)
-       .text(`${toolLbl} Cost\nIntelligence Report`, M, 62, { lineGap: 4 });
+       .text(toolLbl + ' Cost\nIntelligence Report', M, 62, { lineGap: 4 });
 
     const titleH = doc.heightOfString(`${toolLbl} Cost\nIntelligence Report`, { width: INN, fontSize: 26, lineGap: 4 });
     let cy = 62 + titleH + 20;
 
-    doc.fontSize(10).font('Helvetica').fillColor(MUTED).text('Prepared for: ', M, cy, { continued: true })
+    doc.fontSize(10).font('Helvetica').fillColor(MUTED).text('Prepared for:  ', M, cy, { continued: true })
        .font('Helvetica-Bold').fillColor(LIGHT).text(client);
     cy += 16;
     if (address) {
-      doc.fontSize(10).font('Helvetica').fillColor(LIGHT).text(address, M, cy); cy += 14;
+      doc.fontSize(11).font('Helvetica-Bold').fillColor(TEAL).text(address, M, cy); cy += 18;
     }
-    doc.fontSize(9).font('Helvetica').fillColor(MUTED).text(`Report date: ${dateStr}`, M, cy);
+    doc.fontSize(9).font('Helvetica').fillColor(MUTED).text('Report date: ' + dateStr, M, cy);
     cy += 30;
 
     // Estimate box
@@ -412,13 +456,14 @@ async function generatePDF(report, estimate, tool, extra) {
     cy += EBH + 16;
 
     // Details grid — 3 rows × 2 cols
+    const floorAreaLabel = toTitle(get(estimate,'Floor Area','floorArea'));
     const details = isReno
-      ? [['PROPERTY TYPE',propType],['REGION',region],
-         ['RENOVATION LEVEL',level],['SPECIFICATION',spec],
-         ['PROPERTY AGE',age],['BEDROOMS',beds]]
-      : [['EXTENSION TYPE',level],['REGION',region],
-         ['SPECIFICATION',spec],['COMPLEXITY',gv(estimate,'Complexity','complexity')],
-         ['PROPERTY TYPE',propType],['REPORT DATE',dateStr]];
+      ? [['PROPERTY TYPE', propType], ['REGION', region],
+         ['RENOVATION LEVEL', level], ['SPECIFICATION', spec],
+         ['PROPERTY AGE', age],       ['FLOOR AREA', floorAreaLabel||beds]]
+      : [['EXTENSION TYPE', level],   ['REGION', region],
+         ['SPECIFICATION', spec],     ['PROPERTY TYPE', propType],
+         ['REPORT DATE', dateStr],    ['SIZE', get(estimate,'sizeM2','SizeM2')+'m²']];
 
     const CW = INN/2, CH = 38;
     for (let i = 0; i < 6; i++) {

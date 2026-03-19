@@ -44,9 +44,15 @@ export default async function handler(req, res) {
 
   console.log('Processing paid report for:', email);
 
+  // ── Respond to Stripe IMMEDIATELY to prevent retries ──
+  // Stripe retries if it doesn't get a 200 within ~30s.
+  // We do the heavy work (OpenAI + PDF + email) asynchronously after responding.
+  res.status(200).json({ received: true, processing: true });
+
+  // Now do the work — any errors are logged but don't affect the Stripe response
   try {
     const { estimate, extra } = await lookupBuyerData(email);
-    if (!estimate) return res.status(200).json({ received: true, error: 'no estimate found' });
+    if (!estimate) { console.error('No estimate found for:', email); return; }
 
     const tool = (estimate['Tool'] || estimate['tool'] || 'renovation').toLowerCase();
     const reportContent = await generateReport(estimate, extra, tool);
@@ -55,10 +61,9 @@ export default async function handler(req, res) {
     await markAsPaid(email);
 
     console.log('Report sent to:', email);
-    return res.status(200).json({ success: true, email });
   } catch (err) {
-    console.error('Error:', err);
-    return res.status(500).json({ error: err.message });
+    console.error('Report generation failed for', email, ':', err.message);
+    // Already sent 200 to Stripe above — do not send another response
   }
 }
 

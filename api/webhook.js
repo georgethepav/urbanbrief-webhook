@@ -79,6 +79,22 @@ async function markAsPaid(email) {
 
 // ── KEY NORMALISER ────────────────────────────────────────────
 
+function toTitle(s) {
+  if (!s) return '';
+  return String(s)
+    .replace(/_/g, ' ')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/\b\w/g, c => c.toUpperCase())
+    .trim();
+}
+
+function fmtPound(v) {
+  if (!v || v === '—') return '—';
+  const n = parseFloat(String(v).replace(/[^0-9.]/g, ''));
+  if (isNaN(n)) return v;
+  return '£' + Math.round(n).toLocaleString('en-GB');
+}
+
 function get(obj, ...keys) {
   if (!obj) return '';
   for (const k of keys) {
@@ -94,12 +110,17 @@ function get(obj, ...keys) {
 
 async function generateReport(estimate, extra, tool) {
   const isReno   = tool === 'renovation';
-  const region   = get(estimate, 'Region', 'region');
-  const propType = get(estimate, 'Property Type', 'propertyType');
-  const level    = get(estimate, 'Level / Type', 'levelOrType', 'Level/Type');
-  const spec     = get(estimate, 'Spec', 'spec');
-  const estLow   = get(estimate, 'Estimate Low', 'estimateLow');
-  const estHigh  = get(estimate, 'Estimate High', 'estimateHigh');
+  const region   = toTitle(get(estimate, 'Region', 'region'));
+  const propType = toTitle(get(estimate, 'Property Type', 'propertyType'));
+  const level    = toTitle(get(estimate, 'Level / Type', 'levelOrType', 'Level/Type'));
+  const spec     = toTitle(get(estimate, 'Spec', 'spec'));
+  const age      = toTitle(get(estimate, 'Age', 'age'));
+  const beds     = get(estimate, 'Bedrooms', 'bedrooms');
+  const floorArea= toTitle(get(estimate, 'Floor Area', 'floorArea'));
+  const rawLow   = get(estimate, 'Estimate Low', 'estimateLow');
+  const rawHigh  = get(estimate, 'Estimate High', 'estimateHigh');
+  const estLow   = fmtPound(rawLow);
+  const estHigh  = fmtPound(rawHigh);
 
   const extraLines = [];
   if (extra) {
@@ -116,7 +137,7 @@ async function generateReport(estimate, extra, tool) {
       { role: 'user', content: `Generate a full Intelligence Report. Output ONLY valid JSON — no markdown, no backticks.
 
 PROJECT: ${isReno ? 'Renovation' : 'Extension'} | Region: ${region} | Property: ${propType} | Scope: ${level} | Spec: ${spec} | Estimate: ${estLow} – ${estHigh}
-${isReno ? `Bedrooms: ${get(estimate,'Bedrooms','bedrooms')} | Age: ${get(estimate,'Age','age')}` : ''}
+${isReno ? `Bedrooms: ${beds} | Age: ${age} | Floor area: ${floorArea}` : ''}
 EXTRA DETAILS: ${extraLines.length ? extraLines.join(' | ') : 'None provided'}
 
 Return this JSON:
@@ -157,33 +178,25 @@ async function generatePDF(report, estimate, tool, extra) {
     const isReno  = tool === 'renovation';
     const toolLbl = isReno ? 'Renovation' : 'Extension';
 
-    function gv(obj, ...keys) {
-      if (!obj) return '—';
-      for (const k of keys) {
-        if (obj[k] !== undefined && obj[k] !== '') return String(obj[k]);
-        const lk = k.toLowerCase().replace(/[\s/_]/g, '');
-        const match = Object.keys(obj).find(ok => ok.toLowerCase().replace(/[\s/_]/g,'')===lk);
-        if (match && obj[match] !== '') return String(obj[match]);
-      }
-      return '—';
-    }
-
-    const houseNo  = gv(extra, 'houseNo', 'House No/Name', 'houseno');
-    const postcode = gv(extra, 'postcode', 'Postcode');
-    const address  = [houseNo!=='—'?houseNo:null, postcode!=='—'?postcode:null].filter(Boolean).join(', ');
-    const client   = gv(estimate, 'Email', 'email');
-    const estLow   = gv(estimate, 'Estimate Low', 'estimateLow');
-    const estHigh  = gv(estimate, 'Estimate High', 'estimateHigh');
-    const region   = gv(estimate, 'Region', 'region').replace(/_/g,' ');
-    const propType = gv(estimate, 'Property Type', 'propertyType');
-    const spec     = gv(estimate, 'Spec', 'spec');
-    const level    = gv(estimate, 'Level / Type', 'levelOrType', 'Level/Type');
-    const age      = gv(estimate, 'Age', 'age');
-    const beds     = gv(estimate, 'Bedrooms', 'bedrooms');
+    // Use the outer get/toTitle/fmtPound helpers
+    const houseNo  = get(extra||{}, 'houseNo', 'House No/Name', 'houseno') || '';
+    const postcode = get(extra||{}, 'postcode', 'Postcode') || '';
+    const addrParts = [houseNo, postcode].filter(p => p && p !== '—');
+    const address  = addrParts.join(', ');
+    const client   = get(estimate, 'Email', 'email') || '';
+    const rawLo    = get(estimate, 'Estimate Low', 'estimateLow');
+    const rawHi    = get(estimate, 'Estimate High', 'estimateHigh');
+    const lo       = fmtPound(rawLo);
+    const hi       = fmtPound(rawHi);
+    const region   = toTitle(get(estimate, 'Region', 'region'));
+    const propType = toTitle(get(estimate, 'Property Type', 'propertyType'));
+    const spec     = toTitle(get(estimate, 'Spec', 'spec'));
+    const level    = toTitle(get(estimate, 'Level / Type', 'levelOrType', 'Level/Type'));
+    const age      = toTitle(get(estimate, 'Age', 'age'));
+    const beds     = get(estimate, 'Bedrooms', 'bedrooms');
     const dateStr  = new Date().toLocaleDateString('en-GB', { month:'long', year:'numeric' });
 
-    const fmtEst = v => v && v!=='—' ? (v.startsWith('£')?v:'£'+v) : '—';
-    const lo = fmtEst(estLow), hi = fmtEst(estHigh);
+    // lo/hi already built with fmtPound above
 
     // ── PAGE HELPERS ──────────────────────────────────────────────────────
     let pageNum = 0;
@@ -509,10 +522,9 @@ async function generatePDF(report, estimate, tool, extra) {
 
 async function sendReportEmail(email, pdfBuffer, tool, report, estimate) {
   const lbl   = tool==='renovation'?'Renovation':'Extension';
-  const _lo=get(estimate,'Estimate Low','estimateLow'), _hi=get(estimate,'Estimate High','estimateHigh');
-  const estLow=_lo?(_lo.startsWith('\u00a3')?_lo:'\u00a3'+_lo):'—';
-  const estHigh=_hi?(_hi.startsWith('\u00a3')?_hi:'\u00a3'+_hi):'—';
-  const region=(get(estimate,'Region','region')+'').replace(/_/g,' ');
+  const estLow  = fmtPound(get(estimate,'Estimate Low','estimateLow'));
+  const estHigh = fmtPound(get(estimate,'Estimate High','estimateHigh'));
+  const region = toTitle(get(estimate,'Region','region'));
   const summary=(report.executiveSummary||'').substring(0,280)+'…';
 
   await resend.emails.send({

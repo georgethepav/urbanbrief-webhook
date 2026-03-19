@@ -33,6 +33,14 @@ export default async function handler(req, res) {
 
   const email = session.customer_details?.email;
   if (!email) return res.status(200).json({ received: true, error: 'no email' });
+  // Idempotency — prevent double-processing same payment
+  const piId = session.payment_intent || session.id;
+  if (global._processed && global._processed.has(piId)) {
+    console.log('Duplicate webhook skipped:', piId);
+    return res.status(200).json({ received: true, skipped: 'duplicate' });
+  }
+  if (!global._processed) global._processed = new Set();
+  global._processed.add(piId);
 
   console.log('Processing paid report for:', email);
 
@@ -96,8 +104,8 @@ async function generateReport(estimate, extra, tool) {
   const extraLines = [];
   if (extra) {
     const keys = isReno
-      ? ['Postcode','Floor Area','Electrical','Heating','Plumbing','Windows','Structural','External Works']
-      : ['Property Age','Ground Conditions','Planning Situation','Site Access','Party Wall','Glazing Spec','Interior Finish'];
+      ? ['House No/Name','Postcode','Electrical','Heating','Plumbing','Windows','Structural','External Works']
+      : ['Property Age','Ground Conditions','Planning Situation','Site Access','Party Wall','Glazing Spec','Kitchen','Bathrooms','Interior Finish'];
     keys.forEach(k => { const v = get(extra, k); if (v) extraLines.push(`${k}: ${v}`); });
   }
 
@@ -123,15 +131,14 @@ Return this JSON:
   return JSON.parse(raw);
 }
 
-// ── PDF ───────────────────────────────────────────────────────────────────────
+
+// ── PDF ────────────────────────────────────────────────────────────────────────
 
 async function generatePDF(report, estimate, tool, extra) {
-  // Fetch the UB logo from GitHub as base64
   let logoBase64 = null;
   try {
-    const logoRes = await fetch('https://raw.githubusercontent.com/georgethepav/urbanbrief/main/UB-mono.png');
-    const buf = await logoRes.arrayBuffer();
-    logoBase64 = Buffer.from(buf);
+    const r = await fetch('https://raw.githubusercontent.com/georgethepav/urbanbrief/main/UB-mono.png');
+    logoBase64 = Buffer.from(await r.arrayBuffer());
   } catch(e) { console.error('Logo fetch failed:', e.message); }
 
   return new Promise((resolve, reject) => {
@@ -141,416 +148,370 @@ async function generatePDF(report, estimate, tool, extra) {
     doc.on('end',  () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
 
-    // ── CONSTANTS ──────────────────────────────────────────────────────────
+    // ── COLOURS ──────────────────────────────────────────────────────────
     const NAVY  = '#0d1117', TEAL = '#4fc3c3', CARD = '#151c26', CARD2 = '#1a2235';
     const MUTED = '#8a97aa', LIGHT = '#e8edf4', BORD = '#1e2840', DIM = '#404c5e';
     const RED = '#e05252', AMBER = '#e8c84c', GREEN = '#4cba6e', WHITE = '#ffffff';
-    const W = 595.28, H = 841.89, M = 51, INN = W - 2 * M;
+    const W = 595.28, H = 841.89, M = 51, INN = W - 2*M;
 
     const isReno  = tool === 'renovation';
     const toolLbl = isReno ? 'Renovation' : 'Extension';
 
-    function g(obj, ...keys) {
+    function gv(obj, ...keys) {
       if (!obj) return '—';
       for (const k of keys) {
         if (obj[k] !== undefined && obj[k] !== '') return String(obj[k]);
         const lk = k.toLowerCase().replace(/[\s/_]/g, '');
-        const match = Object.keys(obj).find(ok => ok.toLowerCase().replace(/[\s/_]/g, '') === lk);
+        const match = Object.keys(obj).find(ok => ok.toLowerCase().replace(/[\s/_]/g,'')===lk);
         if (match && obj[match] !== '') return String(obj[match]);
       }
       return '—';
     }
 
-    const houseNo  = g(extra, 'houseNo', 'House No/Name', 'houseno');
-    const postcode = g(extra, 'postcode', 'Postcode');
-    const address  = (houseNo !== '—' && postcode !== '—')
-      ? `${houseNo}, ${postcode}`
-      : (houseNo !== '—' ? houseNo : postcode !== '—' ? postcode : '');
-    const client   = g(estimate, 'Email', 'email') || '';
-    const estLow   = g(estimate, 'Estimate Low', 'estimateLow');
-    const estHigh  = g(estimate, 'Estimate High', 'estimateHigh');
-    const region   = g(estimate, 'Region', 'region').replace(/_/g, ' ');
-    const propType = g(estimate, 'Property Type', 'propertyType');
-    const spec     = g(estimate, 'Spec', 'spec');
-    const level    = g(estimate, 'Level / Type', 'levelOrType');
-    const age      = g(estimate, 'Age', 'age');
-    const beds     = g(estimate, 'Bedrooms', 'bedrooms');
-    const dateStr  = new Date().toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
+    const houseNo  = gv(extra, 'houseNo', 'House No/Name', 'houseno');
+    const postcode = gv(extra, 'postcode', 'Postcode');
+    const address  = [houseNo!=='—'?houseNo:null, postcode!=='—'?postcode:null].filter(Boolean).join(', ');
+    const client   = gv(estimate, 'Email', 'email');
+    const estLow   = gv(estimate, 'Estimate Low', 'estimateLow');
+    const estHigh  = gv(estimate, 'Estimate High', 'estimateHigh');
+    const region   = gv(estimate, 'Region', 'region').replace(/_/g,' ');
+    const propType = gv(estimate, 'Property Type', 'propertyType');
+    const spec     = gv(estimate, 'Spec', 'spec');
+    const level    = gv(estimate, 'Level / Type', 'levelOrType', 'Level/Type');
+    const age      = gv(estimate, 'Age', 'age');
+    const beds     = gv(estimate, 'Bedrooms', 'bedrooms');
+    const dateStr  = new Date().toLocaleDateString('en-GB', { month:'long', year:'numeric' });
 
-    const DATA_SRC = 'Cost benchmarks informed by publicly available data from RICS (Royal Institution of Chartered Surveyors), BCIS (Building Cost Information Service), ONS (Office for National Statistics), Rightmove, Zoopla and HM Land Registry. All figures reference 2025/26 published indices and market data. Full methodology: urbanbrief.co.uk/data-sources';
+    const fmtEst = v => v && v!=='—' ? (v.startsWith('£')?v:'£'+v) : '—';
+    const lo = fmtEst(estLow), hi = fmtEst(estHigh);
 
-    // ── HELPERS ────────────────────────────────────────────────────────────
-    function bgFull() { doc.rect(0,0,W,H).fill(NAVY); }
-    function tealBar() { doc.rect(0, H-3, W, 3).fill(TEAL); }
+    // ── PAGE HELPERS ──────────────────────────────────────────────────────
+    let pageNum = 0;
+    const TOTAL = 12; // estimated
 
-    function pageChrome(pgNum, total) {
-      bgFull(); tealBar();
-      if (pgNum === 1) {
+    function newPage() {
+      pageNum++;
+      if (pageNum > 1) doc.addPage({ margin: 0 });
+      // Navy background
+      doc.rect(0, 0, W, H).fill(NAVY);
+      // Top teal strip
+      doc.rect(0, 0, W, 3).fill(TEAL);
+
+      if (pageNum === 1) {
         // Cover bottom strip
-        doc.rect(0, 0, W, 28).fill(CARD);
+        doc.rect(0, H-28, W, 28).fill(CARD);
+        doc.rect(0, H-28, W, 0.4).fill(BORD);
         doc.fontSize(6.5).font('Helvetica').fillColor(DIM)
-           .text('Informed by: RICS · BCIS · ONS · Rightmove · Zoopla · HM Land Registry  —  2025/26 data', M, 10, { width: INN, align: 'center' });
+           .text('Informed by: RICS · BCIS · ONS · Rightmove · Zoopla · HM Land Registry — 2025/26 data',
+                 M, H-17, { width: INN, align: 'center' });
         return;
       }
-      // Header bar
-      doc.rect(0, H-51, W, 51).fill(CARD);
-      doc.rect(0, H-51, W, 0.4).fill(BORD);
-      // Logo in header
+
+      // Header bar (pages 2+)
+      doc.rect(0, 3, W, 48).fill(CARD);
+      doc.rect(0, 51, W, 0.4).fill(BORD);
       if (logoBase64) {
-        try { doc.image(logoBase64, M, H-44, { width: 22, height: 18.7 }); } catch(e) {}
+        try { doc.image(logoBase64, M, 10, { width: 22, height: 18.7 }); } catch(e) {}
       }
-      doc.fontSize(9).font('Helvetica-Bold').fillColor(WHITE).text('UrbanBrief', M+26, H-43);
-      doc.fontSize(7).font('Helvetica').fillColor(MUTED).text('Intelligence Report', M+26, H-33);
-      // Address right side
+      doc.fontSize(9).font('Helvetica-Bold').fillColor(WHITE).text('UrbanBrief', M+26, 12);
+      doc.fontSize(7).font('Helvetica').fillColor(MUTED).text('Intelligence Report', M+26, 24);
       if (address) {
         doc.fontSize(7.5).font('Helvetica-Bold').fillColor(TEAL)
-           .text(address, 0, H-43, { width: W-M, align: 'right' });
+           .text(address, M, 12, { width: INN, align: 'right' });
       }
       doc.fontSize(6.5).font('Helvetica').fillColor(MUTED)
-         .text(`Prepared for: ${client}  ·  Page ${pgNum} of ${total}`, 0, H-33, { width: W-M, align: 'right' });
+         .text(`Prepared for: ${client}  ·  Page ${pageNum} of ${TOTAL}`, M, 24, { width: INN, align: 'right' });
+
       // Footer bar
-      doc.rect(0, 0, W, 34).fill(CARD);
-      doc.rect(0, 34, W, 0.4).fill(BORD);
-      const footerLine = address
+      doc.rect(0, H-34, W, 34).fill(CARD);
+      doc.rect(0, H-34, W, 0.4).fill(BORD);
+      const footLine = address
         ? `${toolLbl} cost estimate prepared for ${client}  ·  ${address}  ·  ${dateStr}`
         : `${toolLbl} cost estimate prepared for ${client}  ·  ${dateStr}`;
-      doc.fontSize(6.5).font('Helvetica').fillColor(MUTED).text(footerLine, M, 13, { width: INN-60 });
-      doc.fontSize(6.5).font('Helvetica').fillColor(MUTED).text('CONFIDENTIAL', 0, 13, { width: W-M, align: 'right' });
-      doc.fontSize(6).font('Helvetica').fillColor(DIM).text('urbanbrief.co.uk  ·  enquiries@urbanbrief.co.uk', M, 4);
+      doc.fontSize(6.5).font('Helvetica').fillColor(MUTED)
+         .text(footLine, M, H-22, { width: INN-60 });
+      doc.fontSize(6.5).font('Helvetica').fillColor(MUTED)
+         .text('CONFIDENTIAL', M, H-22, { width: INN, align: 'right' });
+      doc.fontSize(6).font('Helvetica').fillColor(DIM)
+         .text('urbanbrief.co.uk  ·  enquiries@urbanbrief.co.uk', M, H-12);
     }
 
-    function rule(y, color=BORD, thick=0.5) {
-      doc.rect(M, y, INN, thick).fill(color);
-      return y + thick + 4;
+    const CONTENT_TOP = 62;  // below header
+    const CONTENT_BOT = 44;  // above footer
+    const MAX_Y = H - CONTENT_BOT;
+    let y = CONTENT_TOP;
+
+    function checkY(needed = 60) {
+      if (y + needed > MAX_Y) { newSec(null, null); }
     }
 
-    function secHeading(title, y) {
-      doc.fontSize(15).font('Helvetica-Bold').fillColor(WHITE).text(title, M, y);
-      y += 22;
-      y = rule(y, BORD, 0.5);
-      return y + 6;
+    function newSec(num, title) {
+      newPage();
+      y = CONTENT_TOP + 8;
+      if (num && title) {
+        doc.fontSize(15).font('Helvetica-Bold').fillColor(WHITE).text(`${num}.  ${title}`, M, y);
+        y += 22;
+        doc.rect(M, y, INN, 0.5).fill(BORD);
+        y += 8;
+      }
     }
 
-    function bodyText(text, y, opts={}) {
-      const t = text.replace(/2025([^/])/g, '2025/26$1');
-      doc.fontSize(9.5).font('Helvetica').fillColor(MUTED).text(t, M, y, { width: INN, lineGap: 3, ...opts });
-      return y + doc.heightOfString(t, { width: INN, lineGap: 3, ...opts }) + 10;
+    function bodyText(text) {
+      const t = (text||'').replace(/(\b2025\b)(?!\/)/g, '2025/26');
+      const h = doc.heightOfString(t, { width: INN, lineGap: 3 });
+      checkY(h + 10);
+      doc.fontSize(9.5).font('Helvetica').fillColor(MUTED).text(t, M, y, { width: INN, lineGap: 3 });
+      y += h + 10;
     }
 
-    // ── COST ROW ──────────────────────────────────────────────────────────
-    function costRow(item, lo, hi, notes, y) {
-      const rowH = notes ? 52 : 30;
+    function rule() {
+      doc.rect(M, y, INN, 0.5).fill(BORD);
+      y += 6;
+    }
+
+    // ── COST ROW ─────────────────────────────────────────────────────────
+    function costRow(item, lo, hi, notes) {
+      const noteH = notes ? doc.heightOfString(notes, { width: INN-20, lineGap: 2 }) + 6 : 0;
+      const rowH = 32 + noteH;
+      checkY(rowH + 5);
       doc.roundedRect(M, y, INN, rowH, 4).fill(CARD);
-      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(LIGHT).text(item, M+10, y+9, { width: INN*0.55 });
-      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(TEAL).text(`${lo} – ${hi}`, M+10, y+9, { width: INN-20, align: 'right' });
-      if (notes) doc.fontSize(7.5).font('Helvetica').fillColor(MUTED).text(notes, M+10, y+26, { width: INN-20, lineGap: 2 });
+      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(LIGHT).text(item, M+10, y+10, { width: INN*0.55 });
+      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(TEAL)
+         .text(`${lo} – ${hi}`, M+10, y+10, { width: INN-20, align: 'right' });
+      if (notes) {
+        doc.fontSize(7.5).font('Helvetica').fillColor(MUTED)
+           .text(notes, M+10, y+28, { width: INN-20, lineGap: 2 });
+      }
       doc.rect(M, y+rowH-0.4, INN, 0.4).fill(BORD);
-      return y + rowH + 4;
+      y += rowH + 5;
     }
 
-    // ── RISK ROW ──────────────────────────────────────────────────────────
-    function riskRow(risk, lh, impact, mit, y) {
+    // ── RISK ROW ─────────────────────────────────────────────────────────
+    function riskRow(risk, lh, impact, mit) {
       const col = lh==='High' ? RED : lh==='Medium' ? AMBER : GREEN;
-      const rowH = 64;
+      const rowH = 70;
+      checkY(rowH + 5);
       doc.roundedRect(M, y, INN, rowH, 4).fill(CARD);
       doc.rect(M, y, 3, rowH).fill(col);
-      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(LIGHT).text(risk, M+12, y+8, { width: INN*0.7 });
-      doc.fontSize(8).font('Helvetica-Bold').fillColor(col).text(`${lh} risk`, M+12, y+8, { width: INN-22, align: 'right' });
-      doc.fontSize(8.5).font('Helvetica').fillColor(MUTED).text(`Impact: ${impact}`, M+12, y+27, { width: INN-22 });
-      doc.fontSize(8.5).font('Helvetica').fillColor(MUTED).text(`Mitigation: ${mit}`, M+12, y+40, { width: INN-22, lineGap: 2 });
-      return y + rowH + 5;
+      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(LIGHT).text(risk, M+12, y+10, { width: INN*0.68 });
+      doc.fontSize(8).font('Helvetica-Bold').fillColor(col).text(`${lh} risk`, M+12, y+10, { width: INN-22, align: 'right' });
+      doc.fontSize(8.5).font('Helvetica').fillColor(MUTED).text(`Impact: ${impact}`, M+12, y+28, { width: INN-22 });
+      doc.fontSize(8.5).font('Helvetica').fillColor(MUTED).text(`Mitigation: ${mit}`, M+12, y+42, { width: INN-22, lineGap: 2 });
+      y += rowH + 5;
     }
 
     // ── HIDDEN COST ROW ───────────────────────────────────────────────────
-    function hiddenRow(item, est, exp, y) {
-      const rowH = 50;
+    function hiddenRow(item, est, exp) {
+      const expH = doc.heightOfString(exp, { width: INN-20, lineGap: 2 });
+      const rowH = 28 + expH + 8;
+      checkY(rowH + 5);
       doc.roundedRect(M, y, INN, rowH, 4).fill(CARD);
-      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(LIGHT).text(item, M+10, y+9, { width: INN*0.6 });
-      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(TEAL).text(est, M+10, y+9, { width: INN-20, align: 'right' });
+      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(LIGHT).text(item, M+10, y+10, { width: INN*0.58 });
+      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(TEAL).text(est, M+10, y+10, { width: INN-20, align: 'right' });
       doc.fontSize(8.5).font('Helvetica').fillColor(MUTED).text(exp, M+10, y+28, { width: INN-20, lineGap: 2 });
-      return y + rowH + 5;
+      y += rowH + 5;
     }
 
     // ── TIMELINE ROW ──────────────────────────────────────────────────────
-    function tlRow(n, phase, dur, desc, y) {
-      const rowH = 50;
+    function tlRow(n, phase, dur, desc) {
+      const descH = doc.heightOfString(desc, { width: INN-55, lineGap: 2 });
+      const rowH = Math.max(50, 28 + descH + 10);
+      checkY(rowH + 5);
       doc.roundedRect(M, y, INN, rowH, 4).fill(CARD);
+      // Teal number column
       doc.roundedRect(M, y, 26, rowH, 4).fill(TEAL);
-      doc.rect(M+22, y, 4, rowH).fill(TEAL); // square off right side of teal
-      doc.fontSize(12).font('Helvetica-Bold').fillColor(NAVY).text(String(n), M+3, y+rowH/2-8, { width: 20, align: 'center' });
-      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(LIGHT).text(phase, M+34, y+9, { width: INN-80 });
-      doc.fontSize(8.5).font('Helvetica-Bold').fillColor(TEAL).text(dur, M+34, y+9, { width: INN-44, align: 'right' });
-      doc.fontSize(8.5).font('Helvetica').fillColor(MUTED).text(desc, M+34, y+27, { width: INN-44, lineGap: 2 });
-      return y + rowH + 5;
+      doc.rect(M+22, y, 4, rowH).fill(TEAL);
+      doc.fontSize(12).font('Helvetica-Bold').fillColor(NAVY)
+         .text(String(n), M, y+rowH/2-8, { width: 26, align: 'center' });
+      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(LIGHT).text(phase, M+34, y+10, { width: INN-80 });
+      doc.fontSize(8.5).font('Helvetica-Bold').fillColor(TEAL).text(dur, M+34, y+10, { width: INN-44, align: 'right' });
+      doc.fontSize(8.5).font('Helvetica').fillColor(MUTED).text(desc, M+34, y+26, { width: INN-44, lineGap: 2 });
+      y += rowH + 5;
     }
 
     // ── CHECKLIST ITEM ────────────────────────────────────────────────────
-    function tickItem(text, y) {
+    function tickItem(text) {
+      const h = doc.heightOfString(text, { width: INN-18, lineGap: 2 });
+      checkY(h + 10);
       doc.fontSize(10).font('Helvetica-Bold').fillColor(TEAL).text('✓', M, y);
-      doc.fontSize(9.5).font('Helvetica').fillColor(MUTED).text(text, M+16, y, { width: INN-16, lineGap: 2 });
-      return y + doc.heightOfString(text, { width: INN-16, lineGap: 2 }) + 8;
+      doc.fontSize(9.5).font('Helvetica').fillColor(MUTED).text(text, M+18, y, { width: INN-18, lineGap: 2 });
+      y += h + 8;
     }
 
     // ── STEP ITEM ─────────────────────────────────────────────────────────
-    function stepItem(n, text, y) {
-      const h = Math.max(26, doc.heightOfString(text, { width: INN-28, lineGap: 2 }) + 12);
+    function stepItem(n, text) {
+      const h = Math.max(30, doc.heightOfString(text, { width: INN-30, lineGap: 2 }) + 14);
+      checkY(h + 5);
       doc.roundedRect(M, y, 22, h, 4).fill(TEAL);
-      doc.fontSize(9).font('Helvetica-Bold').fillColor(NAVY).text(String(n), M, y+h/2-6, { width: 22, align: 'center' });
-      doc.fontSize(9.5).font('Helvetica').fillColor(MUTED).text(text, M+28, y+6, { width: INN-28, lineGap: 2 });
-      return y + h + 5;
+      doc.fontSize(9).font('Helvetica-Bold').fillColor(NAVY)
+         .text(String(n), M, y+h/2-7, { width: 22, align: 'center' });
+      doc.fontSize(9.5).font('Helvetica').fillColor(MUTED).text(text, M+28, y+7, { width: INN-30, lineGap: 2 });
+      y += h + 5;
     }
 
     // ── TOC ROW ───────────────────────────────────────────────────────────
-    function tocRow(n, title, y) {
+    function tocRow(n, title) {
+      checkY(28);
       doc.fontSize(10).font('Helvetica-Bold').fillColor(TEAL).text(n, M, y, { width: 18 });
       doc.fontSize(10).font('Helvetica').fillColor(LIGHT).text(title, M+22, y, { width: INN-22 });
       doc.rect(M, y+18, INN, 0.3).fill(BORD);
-      return y + 22;
-    }
-
-    // ── PAGE MANAGEMENT ────────────────────────────────────────────────────
-    const CONTENT_TOP = H - 62;   // below header
-    const CONTENT_BOT = 42;       // above footer
-    let pages = [];
-    let currentPageContent = [];
-
-    function newPage(pgFn) {
-      pages.push(pgFn);
-      currentPageContent = [];
-    }
-
-    // Since PDFKit is sequential we can't pre-count pages easily,
-    // so we'll use a two-pass approach: first pass estimates page count,
-    // second pass renders. For simplicity we'll do single pass with
-    // page numbers added in second render call.
-
-    // ─────────────────────────────────────────────────────────────────────
-    // SINGLE PASS RENDERING with page tracking
-    // ─────────────────────────────────────────────────────────────────────
-    // We'll render everything, track page count as we go,
-    // then overlay personalised headers/footers using doc.pipe approach.
-
-    // Actually — PDFKit supports page events. Let's use that properly.
-    let pageNum = 0;
-    const allPageNums = []; // will be filled after first render for total
-
-    // We do a TWO-PASS: first build to count pages, then rebuild with totals.
-    // Simpler: just render with "Page X" and we'll know total at end.
-    // We'll patch the total in afterwards as a separate text overlay isn't easy.
-    // Best approach: render, count pages, re-render with correct total.
-
-    // For now render with estimated total = 12, close enough for a sample.
-    const TOTAL_EST = 12;
-
-    function startPage(pgN) {
-      if (pgN > 1) doc.addPage({ margin: 0 });
-      pageChrome(pgN, TOTAL_EST);
+      y += 22;
     }
 
     // ══════════════════════════════════════════════════════════════════════
     // PAGE 1: COVER
     // ══════════════════════════════════════════════════════════════════════
-    pageNum = 1;
-    startPage(1);
-    let y = H - 90;
+    newPage();
 
     // Logo
     if (logoBase64) {
-      try { doc.image(logoBase64, M, y, { width: 24, height: 20.4 }); } catch(e) {}
+      try { doc.image(logoBase64, M, 20, { width: 20, height: 17 }); } catch(e) {}
     }
-    y -= 14;
 
-    // Heading
-    doc.fontSize(8).font('Helvetica-Bold').fillColor(TEAL).text('INTELLIGENCE REPORT', M, H-140, { characterSpacing: 1.8 });
-    doc.fontSize(26).font('Helvetica-Bold').fillColor(WHITE).text(`${toolLbl} Cost Intelligence Report`, M, H-124, { lineGap: 4 });
-    doc.fontSize(10).font('Helvetica').fillColor(MUTED).text(`Prepared for:  `, M, H-72, { continued: true })
+    // Tag + title
+    doc.fontSize(8).font('Helvetica-Bold').fillColor(TEAL)
+       .text('INTELLIGENCE REPORT', M, 46, { characterSpacing: 1.8 });
+    doc.fontSize(26).font('Helvetica-Bold').fillColor(WHITE)
+       .text(`${toolLbl} Cost\nIntelligence Report`, M, 62, { lineGap: 4 });
+
+    const titleH = doc.heightOfString(`${toolLbl} Cost\nIntelligence Report`, { width: INN, fontSize: 26, lineGap: 4 });
+    let cy = 62 + titleH + 20;
+
+    doc.fontSize(10).font('Helvetica').fillColor(MUTED).text('Prepared for: ', M, cy, { continued: true })
        .font('Helvetica-Bold').fillColor(LIGHT).text(client);
-    if (address) doc.fontSize(10).font('Helvetica').fillColor(LIGHT).text(address, M, H-59);
-    doc.fontSize(9).font('Helvetica').fillColor(MUTED).text(`Report date: ${dateStr}`, M, H-46);
+    cy += 16;
+    if (address) {
+      doc.fontSize(10).font('Helvetica').fillColor(LIGHT).text(address, M, cy); cy += 14;
+    }
+    doc.fontSize(9).font('Helvetica').fillColor(MUTED).text(`Report date: ${dateStr}`, M, cy);
+    cy += 30;
 
     // Estimate box
-    const EBY = 340, EBH = 90;
-    doc.roundedRect(M, EBY, INN, EBH, 6).fill(CARD2);
-    doc.rect(M, EBY, 4, EBH).fill(TEAL);
-    doc.fontSize(7).font('Helvetica-Bold').fillColor(MUTED).text('ESTIMATED COST RANGE', M+14, EBY+12, { characterSpacing: 1 });
-    doc.fontSize(26).font('Helvetica-Bold').fillColor(TEAL).text(`${estLow} – ${estHigh}`, M+14, EBY+28);
-    doc.fontSize(9).font('Helvetica').fillColor(MUTED).text(`${region}  ·  ${propType}  ·  ${spec} spec`, M+14, EBY+64);
+    const EBH = 88;
+    doc.roundedRect(M, cy, INN, EBH, 6).fill(CARD2);
+    doc.rect(M, cy, 4, EBH).fill(TEAL);
+    doc.fontSize(7).font('Helvetica-Bold').fillColor(MUTED)
+       .text('ESTIMATED COST RANGE', M+14, cy+12, { characterSpacing: 1 });
+    doc.fontSize(26).font('Helvetica-Bold').fillColor(TEAL)
+       .text(`${lo} – ${hi}`, M+14, cy+26);
+    doc.fontSize(9).font('Helvetica').fillColor(MUTED)
+       .text(`${region}  ·  ${propType}  ·  ${spec} spec`, M+14, cy+66);
+    cy += EBH + 16;
 
-    // Details grid
-    const GY = 444, GH = 120, CW = INN / 2;
+    // Details grid — 3 rows × 2 cols
     const details = isReno
-      ? [['PROPERTY TYPE', propType], ['REGION', region],
-         ['RENOVATION LEVEL', level], ['SPECIFICATION', spec],
-         ['PROPERTY AGE', age],       ['BEDROOMS', beds]]
-      : [['EXTENSION TYPE', level],   ['REGION', region],
-         ['SPECIFICATION', spec],     ['COMPLEXITY', g(estimate,'Complexity','complexity')],
-         ['PROPERTY TYPE', propType], ['REPORT DATE', dateStr]];
+      ? [['PROPERTY TYPE',propType],['REGION',region],
+         ['RENOVATION LEVEL',level],['SPECIFICATION',spec],
+         ['PROPERTY AGE',age],['BEDROOMS',beds]]
+      : [['EXTENSION TYPE',level],['REGION',region],
+         ['SPECIFICATION',spec],['COMPLEXITY',gv(estimate,'Complexity','complexity')],
+         ['PROPERTY TYPE',propType],['REPORT DATE',dateStr]];
 
+    const CW = INN/2, CH = 38;
     for (let i = 0; i < 6; i++) {
-      const col = i % 2, row = Math.floor(i / 2);
-      const cx = M + col * CW, cy = GY + row * 40;
-      doc.rect(cx, cy, CW, 40).fill(CARD);
-      doc.rect(cx, cy, CW, 40).stroke(BORD);
-      if (details[i]) {
-        doc.fontSize(6.5).font('Helvetica-Bold').fillColor(MUTED).text(details[i][0], cx+10, cy+7, { characterSpacing: 0.8 });
-        doc.fontSize(11).font('Helvetica-Bold').fillColor(LIGHT).text(details[i][1], cx+10, cy+19, { width: CW-20 });
-      }
+      const col = i%2, row = Math.floor(i/2);
+      const cx = M + col*CW, cY = cy + row*CH;
+      doc.rect(cx, cY, CW, CH).fill(CARD);
+      doc.rect(cx, cY, CW, CH).stroke(BORD);
+      doc.fontSize(6.5).font('Helvetica-Bold').fillColor(MUTED)
+         .text((details[i]||['',''])[0], cx+10, cY+6, { characterSpacing: 0.8, width: CW-20 });
+      doc.fontSize(11).font('Helvetica-Bold').fillColor(LIGHT)
+         .text((details[i]||['',''])[1], cx+10, cY+18, { width: CW-20 });
     }
+    cy += 3*CH + 14;
 
-    // Discrete data source note at bottom
+    // Discrete data source note
     doc.fontSize(6.5).font('Helvetica').fillColor(DIM)
        .text('Cost benchmarks informed by publicly available data from RICS, BCIS, ONS, Rightmove, Zoopla and HM Land Registry (2025/26). Full methodology at urbanbrief.co.uk/data-sources',
-             M, 36, { width: INN });
+             M, cy, { width: INN });
 
     // ══════════════════════════════════════════════════════════════════════
     // PAGE 2: CONTENTS
     // ══════════════════════════════════════════════════════════════════════
-    pageNum++;
-    doc.addPage({ margin: 0 });
-    pageChrome(pageNum, TOTAL_EST);
-    y = CONTENT_TOP - 20;
-
+    newSec(null, null);
     doc.fontSize(16).font('Helvetica-Bold').fillColor(WHITE).text('Contents', M, y); y += 24;
-    y = rule(y); y += 4;
-
-    const TOC = [
-      ['1','Executive Summary'], ['2','Cost Breakdown'], ['3','Risk Factors'],
-      ['4','Hidden Costs'], ['5','Contingency Guidance'], ['6','Project Timeline'],
-      ['7','Contractor Briefing Checklist'], ['8','Next Steps'],
-      ['9','Regional Market Context'], ['10','Disclaimer & Data Sources']
-    ];
-    for (const [n, t] of TOC) { y = tocRow(n, t, y); }
+    rule();
+    const TOC = [['1','Executive Summary'],['2','Cost Breakdown'],['3','Risk Factors'],
+                 ['4','Hidden Costs'],['5','Contingency Guidance'],['6','Project Timeline'],
+                 ['7','Contractor Briefing Checklist'],['8','Next Steps'],
+                 ['9','Regional Market Context'],['10','Disclaimer & Data Sources']];
+    TOC.forEach(([n,t]) => tocRow(n,t));
 
     // ══════════════════════════════════════════════════════════════════════
-    // CONTENT SECTIONS helper
+    // SECTIONS 1–9
     // ══════════════════════════════════════════════════════════════════════
-    function checkPage(needed=80) {
-      if (y + needed > CONTENT_TOP) {
-        pageNum++;
-        doc.addPage({ margin: 0 });
-        pageChrome(pageNum, TOTAL_EST);
-        y = CONTENT_TOP - 10;
-      }
-    }
+    newSec('1','Executive Summary');
+    bodyText(report.executiveSummary || '');
 
-    function newSection(n, title) {
-      pageNum++;
-      doc.addPage({ margin: 0 });
-      pageChrome(pageNum, TOTAL_EST);
-      y = CONTENT_TOP - 10;
-      y = secHeading(`${n}.  ${title}`, y);
-    }
+    newSec('2','Cost Breakdown');
+    bodyText(`All figures are 2025/26 indicative estimates exclusive of VAT. ${region} regional multiplier applied.`);
+    (report.costBreakdown||[]).forEach(r => costRow(r.item||'', r.low||'', r.high||'', r.notes||''));
 
-    // ══════════════════════════════════════════════════════════════════════
-    // SEC 1: EXECUTIVE SUMMARY
-    // ══════════════════════════════════════════════════════════════════════
-    newSection(1, 'Executive Summary');
-    const execText = report.executiveSummary || '';
-    y = bodyText(execText, y);
+    newSec('3','Risk Factors');
+    bodyText('Risks identified based on property type, age and scope. Impact ranges use 2025/26 BCIS remediation data.');
+    (report.riskFactors||[]).forEach(r => riskRow(r.risk||'', r.likelihood||'Low', r.impact||'', r.mitigation||''));
 
-    // ══════════════════════════════════════════════════════════════════════
-    // SEC 2: COST BREAKDOWN
-    // ══════════════════════════════════════════════════════════════════════
-    newSection(2, 'Cost Breakdown');
-    y = bodyText(`All figures are 2025/26 indicative estimates exclusive of VAT. ${region} regional multiplier applied.`, y);
-    for (const item of (report.costBreakdown || [])) {
-      checkPage(60);
-      y = costRow(item.item||'', item.low||'', item.high||'', item.notes||'', y);
-    }
+    newSec('4','Hidden Costs');
+    bodyText('These costs are frequently omitted from initial budgets.');
+    (report.hiddenCosts||[]).forEach(h => hiddenRow(h.item||'', h.estimate||'', h.explanation||''));
 
-    // ══════════════════════════════════════════════════════════════════════
-    // SEC 3: RISK FACTORS
-    // ══════════════════════════════════════════════════════════════════════
-    newSection(3, 'Risk Factors');
-    y = bodyText('Risks identified based on property type, age and scope. Impact ranges use 2025/26 BCIS remediation cost data.', y);
-    for (const r of (report.riskFactors || [])) {
-      checkPage(80);
-      y = riskRow(r.risk||'', r.likelihood||'Low', r.impact||'', r.mitigation||'', y);
-    }
+    newSec('5','Contingency Guidance');
+    bodyText(report.contingencyGuidance || '');
 
-    // ══════════════════════════════════════════════════════════════════════
-    // SEC 4: HIDDEN COSTS
-    // ══════════════════════════════════════════════════════════════════════
-    newSection(4, 'Hidden Costs');
-    y = bodyText('These costs are frequently omitted from initial budgets. Including them from the outset is critical to avoiding overrun.', y);
-    for (const h of (report.hiddenCosts || [])) {
-      checkPage(60);
-      y = hiddenRow(h.item||'', h.estimate||'', h.explanation||'', y);
-    }
+    newSec('6','Project Timeline');
+    bodyText('Indicative programme. Durations depend on contractor resource and unforeseen works.');
+    (report.projectTimeline||[]).forEach((ph,i) => tlRow(i+1, ph.phase||'', ph.duration||'', ph.description||''));
 
-    // ══════════════════════════════════════════════════════════════════════
-    // SEC 5: CONTINGENCY
-    // ══════════════════════════════════════════════════════════════════════
-    newSection(5, 'Contingency Guidance');
-    y = bodyText(report.contingencyGuidance || '', y);
+    newSec('7','Contractor Briefing Checklist');
+    bodyText('Present this checklist to all tendering contractors and include key items as contract conditions.');
+    (report.contractorChecklist||[]).forEach(item => tickItem(item));
 
-    // ══════════════════════════════════════════════════════════════════════
-    // SEC 6: TIMELINE
-    // ══════════════════════════════════════════════════════════════════════
-    newSection(6, 'Project Timeline');
-    y = bodyText('Indicative programme. Durations depend on contractor resource, material lead times, and unforeseen works.', y);
-    for (const [i, ph] of (report.projectTimeline || []).entries()) {
-      checkPage(60);
-      y = tlRow(i+1, ph.phase||'', ph.duration||'', ph.description||'', y);
-    }
-
-    // ══════════════════════════════════════════════════════════════════════
-    // SEC 7: CHECKLIST
-    // ══════════════════════════════════════════════════════════════════════
-    newSection(7, 'Contractor Briefing Checklist');
-    y = bodyText('Present this checklist to all tendering contractors and include key items as contract conditions.', y);
-    for (const item of (report.contractorChecklist || [])) {
-      checkPage(30);
-      y = tickItem(item, y);
-    }
-
-    // ══════════════════════════════════════════════════════════════════════
-    // SEC 8: NEXT STEPS
-    // ══════════════════════════════════════════════════════════════════════
-    newSection(8, 'Next Steps');
+    newSec('8','Next Steps');
     const addrRef = address ? ` for ${address}` : '';
-    y = bodyText(`Recommended actions in sequence${addrRef} before committing to any contract.`, y);
-    for (const [i, s] of (report.nextSteps || []).entries()) {
-      checkPage(40);
-      y = stepItem(i+1, s, y);
-    }
+    bodyText(`Recommended actions in sequence${addrRef} before committing to any contract.`);
+    (report.nextSteps||[]).forEach((s,i) => stepItem(i+1, s));
+
+    newSec('9','Regional Market Context');
+    bodyText(report.regionalContext || '');
 
     // ══════════════════════════════════════════════════════════════════════
-    // SEC 9: REGIONAL CONTEXT
+    // SECTION 10: DISCLAIMER & DATA SOURCES
     // ══════════════════════════════════════════════════════════════════════
-    newSection(9, 'Regional Market Context');
-    y = bodyText(report.regionalContext || '', y);
-
-    // ══════════════════════════════════════════════════════════════════════
-    // SEC 10: DISCLAIMER & DATA SOURCES
-    // ══════════════════════════════════════════════════════════════════════
-    newSection(10, 'Disclaimer & Data Sources');
-    const discText = `This report provides indicative cost estimates based on publicly available 2025/26 UK construction cost data and the project details supplied. Actual costs will vary according to contractor, site conditions, specification changes, and market conditions at time of procurement. This report does not constitute professional advice. Always obtain a minimum of three competitive quotes from suitably qualified and insured contractors before committing to any works. UrbanBrief accepts no liability for decisions made on the basis of estimates herein. This report was prepared exclusively for ${client}${address ? ' at ' + address : ''} and should not be shared or reproduced for any purpose other than initial budget planning.`;
-    y = bodyText(discText, y);
+    newSec('10','Disclaimer & Data Sources');
+    const disc = `This report provides indicative cost estimates based on publicly available 2025/26 UK construction cost data and the project details supplied. Actual costs will vary according to contractor, site conditions, specification changes, and market conditions at time of procurement. This report does not constitute professional advice. Always obtain a minimum of three competitive quotes from suitably qualified and insured contractors. UrbanBrief accepts no liability for decisions made on the basis of estimates herein. This report was prepared exclusively for ${client}${address?' at '+address:''} and should not be shared for any purpose other than initial budget planning.`;
+    bodyText(disc);
     y += 8;
 
     // Data sources box
-    doc.roundedRect(M, y, INN, 64, 6).fill(CARD);
-    doc.rect(M, y, 3, 64).fill(TEAL);
-    doc.fontSize(7).font('Helvetica-Bold').fillColor(TEAL).text('DATA SOURCES', M+12, y+10, { characterSpacing: 1 });
-    doc.fontSize(8).font('Helvetica').fillColor(MUTED).text(DATA_SRC, M+12, y+24, { width: INN-22, lineGap: 2 });
-    y += 74;
+    const DS = 'Cost benchmarks informed by RICS (Royal Institution of Chartered Surveyors), BCIS (Building Cost Information Service), ONS (Office for National Statistics), Rightmove, Zoopla and HM Land Registry. All figures reference 2025/26 published indices. Full methodology: urbanbrief.co.uk/data-sources';
+    const dsH = doc.heightOfString(DS, { width: INN-24, lineGap: 2 }) + 36;
+    checkY(dsH + 10);
+    doc.roundedRect(M, y, INN, dsH, 6).fill(CARD);
+    doc.rect(M, y, 3, dsH).fill(TEAL);
+    doc.fontSize(7).font('Helvetica-Bold').fillColor(TEAL)
+       .text('DATA SOURCES', M+12, y+10, { characterSpacing: 1 });
+    doc.fontSize(8).font('Helvetica').fillColor(MUTED)
+       .text(DS, M+12, y+24, { width: INN-22, lineGap: 2 });
+    y += dsH + 10;
 
     // Sign-off line
     doc.rect(M, y, INN, 0.5).fill(BORD); y += 8;
     doc.fontSize(10).font('Helvetica-Bold').fillColor(TEAL).text('UrbanBrief', M, y);
     doc.fontSize(8).font('Helvetica').fillColor(MUTED)
-       .text('urbanbrief.co.uk  ·  enquiries@urbanbrief.co.uk', 0, y+1, { width: W-M, align: 'right' });
+       .text('urbanbrief.co.uk  ·  enquiries@urbanbrief.co.uk', M, y+1, { width: INN, align: 'right' });
 
     doc.end();
   });
 }
 
+
 // ── EMAIL ─────────────────────────────────────────────────────
 
 async function sendReportEmail(email, pdfBuffer, tool, report, estimate) {
   const lbl   = tool==='renovation'?'Renovation':'Extension';
-  const estLow=get(estimate,'Estimate Low','estimateLow'), estHigh=get(estimate,'Estimate High','estimateHigh');
+  const _lo=get(estimate,'Estimate Low','estimateLow'), _hi=get(estimate,'Estimate High','estimateHigh');
+  const estLow=_lo?(_lo.startsWith('\u00a3')?_lo:'\u00a3'+_lo):'—';
+  const estHigh=_hi?(_hi.startsWith('\u00a3')?_hi:'\u00a3'+_hi):'—';
   const region=(get(estimate,'Region','region')+'').replace(/_/g,' ');
   const summary=(report.executiveSummary||'').substring(0,280)+'…';
 
@@ -559,7 +520,7 @@ async function sendReportEmail(email, pdfBuffer, tool, report, estimate) {
     to:      email,
     replyTo: 'enquiries@urbanbrief.co.uk',
     subject: `Your UrbanBrief ${lbl} Intelligence Report`,
-    html: `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#0d1117;font-family:Arial,sans-serif;"><table width="100%" cellpadding="0" cellspacing="0" style="background:#0d1117;padding:32px 16px;"><tr><td align="center"><table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;"><tr><td style="background:#151c26;border-radius:14px 14px 0 0;padding:28px 32px;border-bottom:1px solid rgba(255,255,255,0.09);"><span style="font-size:18px;font-weight:700;color:#fff;">UrbanBrief</span><span style="font-size:11px;color:#556070;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.09);border-radius:20px;padding:3px 10px;margin-left:10px;text-transform:uppercase;">Intelligence Report</span></td></tr><tr><td style="background:#151c26;padding:32px;"><p style="margin:0 0 6px;font-size:11px;font-weight:600;color:#4fc3c3;text-transform:uppercase;letter-spacing:.14em;">Your report is attached</p><p style="margin:0 0 20px;font-size:22px;font-weight:700;color:#fff;">Your ${lbl} Intelligence Report</p><div style="background:#1a2235;border:1px solid rgba(79,195,195,.2);border-radius:12px;padding:24px;margin-bottom:20px;"><p style="margin:0 0 6px;font-size:10px;color:#556070;text-transform:uppercase;letter-spacing:.12em;">Estimated range</p><p style="margin:0 0 4px;font-size:28px;font-weight:700;color:#4fc3c3;">${estLow} – ${estHigh}</p><p style="margin:0;font-size:12px;color:#8a97aa;">${region}</p></div><p style="margin:0 0 20px;font-size:14px;color:#8a97aa;line-height:1.7;">${summary}</p><div style="background:#1a2235;border:1px solid rgba(79,195,195,.2);border-radius:10px;padding:20px;text-align:center;"><p style="margin:0 0 12px;font-size:13px;color:#8a97aa;">Your full report is attached — cost breakdown, risk factors, hidden costs, timeline and contractor checklist.</p><a href="https://urbanbrief.co.uk" style="display:inline-block;background:#4fc3c3;color:#0d1117;font-size:14px;font-weight:700;padding:11px 28px;border-radius:7px;text-decoration:none;">Visit UrbanBrief →</a></div></td></tr><tr><td style="background:#151c26;border-radius:0 0 14px 14px;border-top:1px solid rgba(255,255,255,0.09);padding:20px 32px;text-align:center;"><p style="margin:0;font-size:12px;color:#556070;">© 2025 UrbanBrief · <a href="https://urbanbrief.co.uk" style="color:#4fc3c3;text-decoration:none;">urbanbrief.co.uk</a></p></td></tr></table></td></tr></table></body></html>`,
+    html: `<!DOCTYPE html><html><body style="margin:0;padding:0;background:#0d1117;font-family:Arial,sans-serif;"><table width="100%" cellpadding="0" cellspacing="0" style="background:#0d1117;padding:32px 16px;"><tr><td align="center"><table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;"><tr><td style="background:#151c26;border-radius:14px 14px 0 0;padding:28px 32px;border-bottom:1px solid rgba(255,255,255,0.09);"><img src="https://raw.githubusercontent.com/georgethepav/urbanbrief/main/UB-mono.png" width="32" height="27" style="vertical-align:middle;margin-right:10px;filter:invert(72%) sepia(54%) saturate(456%) hue-rotate(131deg) brightness(96%) contrast(86%);" alt="UB"><span style="font-size:18px;font-weight:700;color:#fff;vertical-align:middle;">UrbanBrief</span><span style="font-size:11px;color:#556070;background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.09);border-radius:20px;padding:3px 10px;margin-left:10px;text-transform:uppercase;">Intelligence Report</span></td></tr><tr><td style="background:#151c26;padding:32px;"><p style="margin:0 0 6px;font-size:11px;font-weight:600;color:#4fc3c3;text-transform:uppercase;letter-spacing:.14em;">Your report is attached</p><p style="margin:0 0 20px;font-size:22px;font-weight:700;color:#fff;">Your ${lbl} Intelligence Report</p><div style="background:#1a2235;border:1px solid rgba(79,195,195,.2);border-radius:12px;padding:24px;margin-bottom:20px;"><p style="margin:0 0 6px;font-size:10px;color:#556070;text-transform:uppercase;letter-spacing:.12em;">Estimated range</p><p style="margin:0 0 4px;font-size:28px;font-weight:700;color:#4fc3c3;">${estLow} – ${estHigh}</p><p style="margin:0;font-size:12px;color:#8a97aa;">${region}</p></div><p style="margin:0 0 20px;font-size:14px;color:#8a97aa;line-height:1.7;">${summary}</p><div style="background:#1a2235;border:1px solid rgba(79,195,195,.2);border-radius:10px;padding:20px;text-align:center;"><p style="margin:0 0 12px;font-size:13px;color:#8a97aa;">Your full report is attached — cost breakdown, risk factors, hidden costs, timeline and contractor checklist.</p><a href="https://urbanbrief.co.uk" style="display:inline-block;background:#4fc3c3;color:#0d1117;font-size:14px;font-weight:700;padding:11px 28px;border-radius:7px;text-decoration:none;">Visit UrbanBrief →</a></div></td></tr><tr><td style="background:#151c26;border-radius:0 0 14px 14px;border-top:1px solid rgba(255,255,255,0.09);padding:20px 32px;text-align:center;"><p style="margin:0;font-size:12px;color:#556070;">© 2025 UrbanBrief · <a href="https://urbanbrief.co.uk" style="color:#4fc3c3;text-decoration:none;">urbanbrief.co.uk</a></p></td></tr></table></td></tr></table></body></html>`,
     attachments: [{ filename: 'UrbanBrief-Intelligence-Report.pdf', content: pdfBuffer.toString('base64') }],
   });
 }

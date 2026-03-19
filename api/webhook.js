@@ -156,7 +156,7 @@ async function generateReport(estimate, extra, tool) {
   const spec     = toTitle(get(estimate, 'Spec', 'spec'));
   const age      = toTitle(get(estimate, 'Age', 'age'));
   const beds     = get(estimate, 'Bedrooms', 'bedrooms');
-  const floorArea= toTitle(get(estimate, 'Floor Area', 'floorArea'));
+  const floorArea= toTitle(get(extra||{}, 'floorArea', 'Floor Area', 'fa') || get(estimate, 'Floor Area', 'floorArea'));
   const rawLow   = get(estimate, 'Estimate Low', 'estimateLow');
   const rawHigh  = get(estimate, 'Estimate High', 'estimateHigh');
   const estLow   = fmtPound(rawLow);
@@ -193,370 +193,393 @@ Return this JSON:
 }
 
 
+
 // ── PDF ────────────────────────────────────────────────────────────────────────
 
 async function generatePDF(report, estimate, tool, extra) {
-  let logoBase64 = null;
+  let logoBuf = null;
   try {
     const r = await fetch('https://raw.githubusercontent.com/georgethepav/urbanbrief/main/UB-mono.png');
-    logoBase64 = Buffer.from(await r.arrayBuffer());
+    logoBuf = Buffer.from(await r.arrayBuffer());
   } catch(e) { console.error('Logo fetch failed:', e.message); }
 
   return new Promise((resolve, reject) => {
-    const doc    = new PDFDocument({ size: 'A4', margin: 0, compress: true });
     const chunks = [];
+    const doc = new PDFDocument({ size: 'A4', margin: 0, compress: true, autoFirstPage: false });
     doc.on('data', c => chunks.push(c));
     doc.on('end',  () => resolve(Buffer.concat(chunks)));
     doc.on('error', reject);
 
-    // ── COLOURS ──────────────────────────────────────────────────────────
-    const NAVY  = '#0d1117', TEAL = '#4fc3c3', CARD = '#151c26', CARD2 = '#1a2235';
-    const MUTED = '#8a97aa', LIGHT = '#e8edf4', BORD = '#1e2840', DIM = '#404c5e';
-    const RED = '#e05252', AMBER = '#e8c84c', GREEN = '#4cba6e', WHITE = '#ffffff';
+    // ── PALETTE ──────────────────────────────────────────────────────────
+    const C = {
+      navy:  '#0d1117', card:  '#151c26', card2: '#1a2235',
+      teal:  '#4fc3c3', muted: '#8a97aa', light: '#e8edf4',
+      bord:  '#1e2840', dim:   '#404c5e', white: '#ffffff',
+      red:   '#e05252', amber: '#e8c84c', green: '#4cba6e',
+    };
     const W = 595.28, H = 841.89, M = 51, INN = W - 2*M;
+    const HDR_H  = 51;   // header bar height (pages 2+)
+    const FTR_H  = 34;   // footer bar height
+    const TOP    = HDR_H + 10;   // content starts here
+    const BOT    = H - FTR_H - 10; // content ends here
+    const isReno = tool === 'renovation';
+    const lbl    = isReno ? 'Renovation' : 'Extension';
 
-    const isReno  = tool === 'renovation';
-    const toolLbl = isReno ? 'Renovation' : 'Extension';
+    // ── DATA ─────────────────────────────────────────────────────────────
+    const propType  = toTitle(get(estimate, 'Property Type', 'propertyType'));
+    const region    = toTitle(get(estimate, 'Region', 'region'));
+    const level     = toTitle(get(estimate, 'Level / Type', 'levelOrType', 'Level/Type'));
+    const spec      = toTitle(get(estimate, 'Spec', 'spec'));
+    const age       = toTitle(get(estimate, 'Age', 'age'));
+    const beds      = get(estimate, 'Bedrooms', 'bedrooms');
+    const floorArea = toTitle(get(extra||{}, 'floorArea','Floor Area','fa') || get(estimate,'Floor Area','floorArea'));
+    const rawLo     = get(estimate, 'Estimate Low',  'estimateLow');
+    const rawHi     = get(estimate, 'Estimate High', 'estimateHigh');
+    const lo        = fmtPound(rawLo);
+    const hi        = fmtPound(rawHi);
+    const client    = get(estimate, 'Email', 'email') || '';
+    const houseNo   = get(extra||{}, 'houseNo', 'House No/Name', 'houseno') || '';
+    const postcode  = get(extra||{}, 'postcode', 'Postcode') || '';
+    const address   = [houseNo, postcode].filter(p => p && p !== '—').join(', ');
+    const dateStr   = new Date().toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
 
-    // Use the outer get/toTitle/fmtPound helpers
-    const houseNo  = get(extra||{}, 'houseNo', 'House No/Name', 'houseno') || '';
-    const postcode = get(extra||{}, 'postcode', 'Postcode') || '';
-    const addrParts = [houseNo, postcode].filter(p => p && p !== '—');
-    const address  = addrParts.join(', ');
-    const client   = get(estimate, 'Email', 'email') || '';
-    const rawLo    = get(estimate, 'Estimate Low', 'estimateLow');
-    const rawHi    = get(estimate, 'Estimate High', 'estimateHigh');
-    const lo       = fmtPound(rawLo);
-    const hi       = fmtPound(rawHi);
-    const region   = toTitle(get(estimate, 'Region', 'region'));
-    const propType = toTitle(get(estimate, 'Property Type', 'propertyType'));
-    const spec     = toTitle(get(estimate, 'Spec', 'spec'));
-    const level    = toTitle(get(estimate, 'Level / Type', 'levelOrType', 'Level/Type'));
-    const age      = toTitle(get(estimate, 'Age', 'age'));
-    const beds     = get(estimate, 'Bedrooms', 'bedrooms');
-    const dateStr  = new Date().toLocaleDateString('en-GB', { month:'long', year:'numeric' });
+    // ── HELPERS ──────────────────────────────────────────────────────────
+    let pgNum = 0;
 
-    // lo/hi already built with fmtPound above
-
-    // ── PAGE HELPERS ──────────────────────────────────────────────────────
-    let pageNum = 0;
-    let TOTAL_PAGES = 0; // counted on first pass — updated via closure
-
-    function newPage() {
-      pageNum++;
-      if (pageNum > 1) doc.addPage({ margin: 0 });
-      // Navy background
-      doc.rect(0, 0, W, H).fill(NAVY);
+    function addPage() {
+      pgNum++;
+      doc.addPage({ size: 'A4', margin: 0 });
+      // Navy full background
+      doc.rect(0, 0, W, H).fill(C.navy);
       // Top teal strip
-      doc.rect(0, 0, W, 3).fill(TEAL);
+      doc.rect(0, 0, W, 3).fill(C.teal);
+    }
 
-      if (pageNum === 1) {
-        // Cover bottom strip
-        doc.rect(0, H-28, W, 28).fill(CARD);
-        doc.rect(0, H-28, W, 0.4).fill(BORD);
-        doc.fontSize(6.5).font('Helvetica').fillColor(DIM)
-           .text('Informed by: RICS · BCIS · ONS · Rightmove · Zoopla · HM Land Registry — 2025/26 data',
-                 M, H-17, { width: INN, align: 'center' });
-        return;
-      }
+    function drawCover() {
+      // Bottom data strip
+      doc.rect(0, H - 28, W, 28).fill(C.card);
+      doc.rect(0, H - 28, W, 0.4).fill(C.bord);
+      doc.fontSize(6.5).font('Helvetica').fillColor(C.dim)
+         .text('Informed by: RICS · BCIS · ONS · Rightmove · Zoopla · HM Land Registry — 2025/26 data',
+               M, H - 17, { width: INN, align: 'center' });
+    }
 
-      // Header bar (pages 2+)
-      doc.rect(0, 3, W, 48).fill(CARD);
-      doc.rect(0, 51, W, 0.4).fill(BORD);
-      if (logoBase64) {
-        try { doc.image(logoBase64, M, 10, { width: 22, height: 18.7 }); } catch(e) {}
-      }
-      doc.fontSize(9).font('Helvetica-Bold').fillColor(WHITE).text('UrbanBrief', M+26, 12);
-      doc.fontSize(7).font('Helvetica').fillColor(MUTED).text('Intelligence Report', M+26, 24);
+    function drawChrome() {
+      // Header
+      doc.rect(0, 3, W, HDR_H - 3).fill(C.card);
+      doc.rect(0, HDR_H, W, 0.4).fill(C.bord);
+      if (logoBuf) { try { doc.image(logoBuf, M, 10, { width: 20, height: 17 }); } catch(e) {} }
+      doc.fontSize(9).font('Helvetica-Bold').fillColor(C.white).text('UrbanBrief', M + 24, 13);
+      doc.fontSize(7).font('Helvetica').fillColor(C.muted).text('Intelligence Report', M + 24, 25);
       if (address) {
-        doc.fontSize(7.5).font('Helvetica-Bold').fillColor(TEAL)
-           .text(address, M, 12, { width: INN, align: 'right' });
+        doc.fontSize(7.5).font('Helvetica-Bold').fillColor(C.teal)
+           .text(address, M, 13, { width: INN, align: 'right' });
       }
-      doc.fontSize(6.5).font('Helvetica').fillColor(MUTED)
-         .text('Prepared for: ' + client + '  ·  Page ' + pageNum, M, 24, { width: INN, align: 'right' });
-
-      // Footer bar
-      doc.rect(0, H-34, W, 34).fill(CARD);
-      doc.rect(0, H-34, W, 0.4).fill(BORD);
-      const footLine = address
-        ? `${toolLbl} cost estimate prepared for ${client}  ·  ${address}  ·  ${dateStr}`
-        : `${toolLbl} cost estimate prepared for ${client}  ·  ${dateStr}`;
-      doc.fontSize(6.5).font('Helvetica').fillColor(MUTED)
-         .text(footLine, M, H-22, { width: INN-60 });
-      doc.fontSize(6.5).font('Helvetica').fillColor(MUTED)
-         .text('CONFIDENTIAL', M, H-22, { width: INN, align: 'right' });
-      doc.fontSize(6).font('Helvetica').fillColor(DIM)
-         .text('urbanbrief.co.uk  ·  enquiries@urbanbrief.co.uk', M, H-12);
+      doc.fontSize(6.5).font('Helvetica').fillColor(C.muted)
+         .text('Prepared for: ' + client + '  ·  Page ' + pgNum, M, 25, { width: INN, align: 'right' });
+      // Footer
+      doc.rect(0, H - FTR_H, W, FTR_H).fill(C.card);
+      doc.rect(0, H - FTR_H, W, 0.4).fill(C.bord);
+      const foot = address
+        ? lbl + ' estimate for ' + client + '  ·  ' + address + '  ·  ' + dateStr
+        : lbl + ' estimate for ' + client + '  ·  ' + dateStr;
+      doc.fontSize(6.5).font('Helvetica').fillColor(C.muted)
+         .text(foot, M, H - FTR_H + 9, { width: INN - 70 });
+      doc.fontSize(6.5).fillColor(C.muted)
+         .text('CONFIDENTIAL', M, H - FTR_H + 9, { width: INN, align: 'right' });
+      doc.fontSize(6).fillColor(C.dim)
+         .text('urbanbrief.co.uk  ·  enquiries@urbanbrief.co.uk', M, H - FTR_H + 21);
     }
 
-    const CONTENT_TOP = 62;  // below header
-    const CONTENT_BOT = 44;  // above footer
-    const MAX_Y = H - CONTENT_BOT;
-    let y = CONTENT_TOP;
+    // Current Y tracker
+    let y = TOP;
 
-    function checkY(needed = 60) {
-      if (y + needed > MAX_Y) {
-        newPage();
-        y = CONTENT_TOP + 8;
+    function needY(h) {
+      if (y + h > BOT) {
+        addPage();
+        drawChrome();
+        y = TOP + 6;
       }
     }
 
-    function newSec(num, title) {
-      newPage();
-      y = CONTENT_TOP + 8;
+    function secPage(num, title) {
+      addPage();
+      drawChrome();
+      y = TOP + 8;
       if (num && title) {
-        doc.fontSize(15).font('Helvetica-Bold').fillColor(WHITE)
+        doc.fontSize(15).font('Helvetica-Bold').fillColor(C.white)
            .text(num + '.  ' + title, M, y);
         y += 22;
-        doc.rect(M, y, INN, 0.5).fill(BORD);
+        doc.rect(M, y, INN, 0.5).fill(C.bord);
         y += 8;
       }
     }
 
-    function bodyText(text) {
-      const t = (text||'').replace(/(\b2025\b)(?!\/)/g, '2025/26');
+    function bodyTxt(text) {
+      if (!text) return;
+      const t = String(text).replace(/(\b2025\b)(?!\/)/g, '2025/26');
+      doc.fontSize(9.5).font('Helvetica').fillColor(C.muted);
       const h = doc.heightOfString(t, { width: INN, lineGap: 3 });
-      checkY(h + 10);
-      doc.fontSize(9.5).font('Helvetica').fillColor(MUTED).text(t, M, y, { width: INN, lineGap: 3 });
-      y += h + 10;
-    }
-
-    function rule() {
-      doc.rect(M, y, INN, 0.5).fill(BORD);
-      y += 6;
-    }
-
-    // ── COST ROW ─────────────────────────────────────────────────────────
-    function costRow(item, lo, hi, notes) {
-      const noteH = notes ? doc.heightOfString(notes, { width: INN-20, lineGap: 2 }) + 6 : 0;
-      const rowH = 32 + noteH;
-      checkY(rowH + 5);
-      doc.roundedRect(M, y, INN, rowH, 4).fill(CARD);
-      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(LIGHT).text(item, M+10, y+10, { width: INN*0.55 });
-      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(TEAL)
-         .text(`${lo} – ${hi}`, M+10, y+10, { width: INN-20, align: 'right' });
-      if (notes) {
-        doc.fontSize(7.5).font('Helvetica').fillColor(MUTED)
-           .text(notes, M+10, y+28, { width: INN-20, lineGap: 2 });
-      }
-      doc.rect(M, y+rowH-0.4, INN, 0.4).fill(BORD);
-      y += rowH + 5;
-    }
-
-    // ── RISK ROW ─────────────────────────────────────────────────────────
-    function riskRow(risk, lh, impact, mit) {
-      const col = lh==='High' ? RED : lh==='Medium' ? AMBER : GREEN;
-      const rowH = 70;
-      checkY(rowH + 5);
-      doc.roundedRect(M, y, INN, rowH, 4).fill(CARD);
-      doc.rect(M, y, 3, rowH).fill(col);
-      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(LIGHT).text(risk, M+12, y+10, { width: INN*0.68 });
-      doc.fontSize(8).font('Helvetica-Bold').fillColor(col).text(`${lh} risk`, M+12, y+10, { width: INN-22, align: 'right' });
-      doc.fontSize(8.5).font('Helvetica').fillColor(MUTED).text(`Impact: ${impact}`, M+12, y+28, { width: INN-22 });
-      doc.fontSize(8.5).font('Helvetica').fillColor(MUTED).text(`Mitigation: ${mit}`, M+12, y+42, { width: INN-22, lineGap: 2 });
-      y += rowH + 5;
-    }
-
-    // ── HIDDEN COST ROW ───────────────────────────────────────────────────
-    function hiddenRow(item, est, exp) {
-      const expH = doc.heightOfString(exp, { width: INN-20, lineGap: 2 });
-      const rowH = 28 + expH + 8;
-      checkY(rowH + 5);
-      doc.roundedRect(M, y, INN, rowH, 4).fill(CARD);
-      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(LIGHT).text(item, M+10, y+10, { width: INN*0.58 });
-      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(TEAL).text(est, M+10, y+10, { width: INN-20, align: 'right' });
-      doc.fontSize(8.5).font('Helvetica').fillColor(MUTED).text(exp, M+10, y+28, { width: INN-20, lineGap: 2 });
-      y += rowH + 5;
-    }
-
-    // ── TIMELINE ROW ──────────────────────────────────────────────────────
-    function tlRow(n, phase, dur, desc) {
-      const descH = doc.heightOfString(desc, { width: INN-55, lineGap: 2 });
-      const rowH = Math.max(50, 28 + descH + 10);
-      checkY(rowH + 5);
-      doc.roundedRect(M, y, INN, rowH, 4).fill(CARD);
-      // Teal number column
-      doc.roundedRect(M, y, 26, rowH, 4).fill(TEAL);
-      doc.rect(M+22, y, 4, rowH).fill(TEAL);
-      doc.fontSize(12).font('Helvetica-Bold').fillColor(NAVY)
-         .text(String(n), M, y+rowH/2-8, { width: 26, align: 'center' });
-      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(LIGHT).text(phase, M+34, y+10, { width: INN-80 });
-      doc.fontSize(8.5).font('Helvetica-Bold').fillColor(TEAL).text(dur, M+34, y+10, { width: INN-44, align: 'right' });
-      doc.fontSize(8.5).font('Helvetica').fillColor(MUTED).text(desc, M+34, y+26, { width: INN-44, lineGap: 2 });
-      y += rowH + 5;
-    }
-
-    // ── CHECKLIST ITEM ────────────────────────────────────────────────────
-    function tickItem(text) {
-      const h = doc.heightOfString(text, { width: INN-18, lineGap: 2 });
-      checkY(h + 10);
-      doc.fontSize(10).font('Helvetica-Bold').fillColor(TEAL).text('✓', M, y);
-      doc.fontSize(9.5).font('Helvetica').fillColor(MUTED).text(text, M+18, y, { width: INN-18, lineGap: 2 });
+      needY(h + 8);
+      doc.text(t, M, y, { width: INN, lineGap: 3 });
       y += h + 8;
     }
 
-    // ── STEP ITEM ─────────────────────────────────────────────────────────
-    function stepItem(n, text) {
-      const h = Math.max(30, doc.heightOfString(text, { width: INN-30, lineGap: 2 }) + 14);
-      checkY(h + 5);
-      doc.roundedRect(M, y, 22, h, 4).fill(TEAL);
-      doc.fontSize(9).font('Helvetica-Bold').fillColor(NAVY)
-         .text(String(n), M, y+h/2-7, { width: 22, align: 'center' });
-      doc.fontSize(9.5).font('Helvetica').fillColor(MUTED).text(text, M+28, y+7, { width: INN-30, lineGap: 2 });
-      y += h + 5;
+    function hRule() {
+      needY(8);
+      doc.rect(M, y, INN, 0.4).fill(C.bord);
+      y += 6;
     }
 
-    // ── TOC ROW ───────────────────────────────────────────────────────────
     function tocRow(n, title) {
-      checkY(28);
-      doc.fontSize(10).font('Helvetica-Bold').fillColor(TEAL).text(n, M, y, { width: 18 });
-      doc.fontSize(10).font('Helvetica').fillColor(LIGHT).text(title, M+22, y, { width: INN-22 });
-      doc.rect(M, y+18, INN, 0.3).fill(BORD);
+      needY(24);
+      doc.fontSize(10).font('Helvetica-Bold').fillColor(C.teal).text(String(n), M, y, { width: 18 });
+      doc.fontSize(10).font('Helvetica').fillColor(C.light).text(title, M + 22, y, { width: INN - 22 });
+      doc.rect(M, y + 18, INN, 0.3).fill(C.bord);
       y += 22;
     }
 
-    // ══════════════════════════════════════════════════════════════════════
-    // PAGE 1: COVER
-    // ══════════════════════════════════════════════════════════════════════
-    newPage();
-
-    // Logo — large, top right on cover
-    if (logoBase64) {
-      try { doc.image(logoBase64, W-M-48, 16, { width: 48, height: 40.8 }); } catch(e) {}
+    function costRow(item, cLo, cHi, notes) {
+      doc.fontSize(9.5).font('Helvetica').fillColor(C.muted);
+      const noteH = notes ? doc.heightOfString(notes, { width: INN - 20, lineGap: 2 }) + 4 : 0;
+      const rH = 30 + noteH;
+      needY(rH + 5);
+      doc.roundedRect(M, y, INN, rH, 4).fill(C.card);
+      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(C.light)
+         .text(item, M + 10, y + 9, { width: INN * 0.54 });
+      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(C.teal)
+         .text(cLo + ' – ' + cHi, M + 10, y + 9, { width: INN - 20, align: 'right' });
+      if (notes) {
+        doc.fontSize(7.5).font('Helvetica').fillColor(C.muted)
+           .text(notes, M + 10, y + 26, { width: INN - 20, lineGap: 2 });
+      }
+      doc.rect(M, y + rH - 0.4, INN, 0.4).fill(C.bord);
+      y += rH + 5;
     }
 
-    // Tag + title
-    doc.fontSize(8).font('Helvetica-Bold').fillColor(TEAL)
-       .text('INTELLIGENCE REPORT', M, 46, { characterSpacing: 1.8 });
-    doc.fontSize(26).font('Helvetica-Bold').fillColor(WHITE)
-       .text(toolLbl + ' Cost\nIntelligence Report', M, 62, { lineGap: 4 });
+    function riskRow(risk, lh, impact, mit) {
+      const col = lh === 'High' ? C.red : lh === 'Medium' ? C.amber : C.green;
+      doc.fontSize(8.5).font('Helvetica').fillColor(C.muted);
+      const mitH = doc.heightOfString('Mitigation: ' + mit, { width: INN - 22, lineGap: 2 });
+      const rH = 40 + mitH + 8;
+      needY(rH + 5);
+      doc.roundedRect(M, y, INN, rH, 4).fill(C.card);
+      doc.rect(M, y, 3, rH).fill(col);
+      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(C.light)
+         .text(risk, M + 12, y + 9, { width: INN * 0.68 });
+      doc.fontSize(8).font('Helvetica-Bold').fillColor(col)
+         .text(lh + ' risk', M + 12, y + 9, { width: INN - 22, align: 'right' });
+      doc.fontSize(8.5).font('Helvetica').fillColor(C.muted)
+         .text('Impact: ' + impact, M + 12, y + 26, { width: INN - 22 });
+      doc.text('Mitigation: ' + mit, M + 12, y + 38, { width: INN - 22, lineGap: 2 });
+      y += rH + 5;
+    }
 
-    const titleH = doc.heightOfString(`${toolLbl} Cost\nIntelligence Report`, { width: INN, fontSize: 26, lineGap: 4 });
-    let cy = 62 + titleH + 20;
+    function hiddenRow(item, est, exp) {
+      doc.fontSize(8.5).font('Helvetica').fillColor(C.muted);
+      const expH = doc.heightOfString(exp, { width: INN - 20, lineGap: 2 });
+      const rH = 28 + expH + 8;
+      needY(rH + 5);
+      doc.roundedRect(M, y, INN, rH, 4).fill(C.card);
+      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(C.light)
+         .text(item, M + 10, y + 9, { width: INN * 0.58 });
+      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(C.teal)
+         .text(est, M + 10, y + 9, { width: INN - 20, align: 'right' });
+      doc.fontSize(8.5).font('Helvetica').fillColor(C.muted)
+         .text(exp, M + 10, y + 26, { width: INN - 20, lineGap: 2 });
+      y += rH + 5;
+    }
 
-    doc.fontSize(10).font('Helvetica').fillColor(MUTED).text('Prepared for:  ', M, cy, { continued: true })
-       .font('Helvetica-Bold').fillColor(LIGHT).text(client);
+    function tlRow(n, phase, dur, desc) {
+      doc.fontSize(8.5).font('Helvetica').fillColor(C.muted);
+      const dH = doc.heightOfString(desc, { width: INN - 55, lineGap: 2 });
+      const rH = Math.max(48, 26 + dH + 10);
+      needY(rH + 5);
+      doc.roundedRect(M, y, INN, rH, 4).fill(C.card);
+      doc.roundedRect(M, y, 26, rH, 4).fill(C.teal);
+      doc.rect(M + 22, y, 4, rH).fill(C.teal);
+      doc.fontSize(12).font('Helvetica-Bold').fillColor(C.navy)
+         .text(String(n), M, y + rH / 2 - 8, { width: 26, align: 'center' });
+      doc.fontSize(9.5).font('Helvetica-Bold').fillColor(C.light)
+         .text(phase, M + 34, y + 9, { width: INN - 80 });
+      doc.fontSize(8.5).font('Helvetica-Bold').fillColor(C.teal)
+         .text(dur, M + 34, y + 9, { width: INN - 44, align: 'right' });
+      doc.fontSize(8.5).font('Helvetica').fillColor(C.muted)
+         .text(desc, M + 34, y + 26, { width: INN - 44, lineGap: 2 });
+      y += rH + 5;
+    }
+
+    function tickItem(text) {
+      doc.fontSize(9.5).font('Helvetica').fillColor(C.muted);
+      const h = doc.heightOfString(text, { width: INN - 18, lineGap: 2 });
+      needY(h + 8);
+      doc.fontSize(10).font('Helvetica-Bold').fillColor(C.teal).text('✓', M, y);
+      doc.fontSize(9.5).font('Helvetica').fillColor(C.muted)
+         .text(text, M + 18, y, { width: INN - 18, lineGap: 2 });
+      y += h + 7;
+    }
+
+    function stepItem(n, text) {
+      doc.fontSize(9.5).font('Helvetica').fillColor(C.muted);
+      const h = Math.max(28, doc.heightOfString(text, { width: INN - 30, lineGap: 2 }) + 14);
+      needY(h + 5);
+      doc.roundedRect(M, y, 22, h, 4).fill(C.teal);
+      doc.fontSize(9).font('Helvetica-Bold').fillColor(C.navy)
+         .text(String(n), M, y + h / 2 - 7, { width: 22, align: 'center' });
+      doc.fontSize(9.5).font('Helvetica').fillColor(C.muted)
+         .text(text, M + 28, y + 7, { width: INN - 30, lineGap: 2 });
+      y += h + 5;
+    }
+
+    // ════════════════════════════════════════════════════════════════════
+    // PAGE 1 — COVER
+    // ════════════════════════════════════════════════════════════════════
+    addPage();
+    drawCover();
+
+    // Logo — large top right
+    if (logoBuf) { try { doc.image(logoBuf, W - M - 52, 16, { width: 52, height: 44 }); } catch(e) {} }
+
+    let cy = 22;
+    doc.fontSize(8).font('Helvetica-Bold').fillColor(C.teal)
+       .text('INTELLIGENCE REPORT', M, cy, { characterSpacing: 1.8 });
+    cy += 20;
+    doc.fontSize(24).font('Helvetica-Bold').fillColor(C.white)
+       .text(lbl + ' Cost Intelligence Report', M, cy, { width: W - M - 70, lineGap: 4 });
+    cy += doc.heightOfString(lbl + ' Cost Intelligence Report',
+          { width: W - M - 70, fontSize: 24, lineGap: 4 }) + 18;
+
+    doc.fontSize(10).font('Helvetica').fillColor(C.muted)
+       .text('Prepared for:  ', M, cy, { continued: true })
+       .font('Helvetica-Bold').fillColor(C.light).text(client, { continued: false });
     cy += 16;
     if (address) {
-      doc.fontSize(11).font('Helvetica-Bold').fillColor(TEAL).text(address, M, cy); cy += 18;
+      doc.fontSize(11).font('Helvetica-Bold').fillColor(C.teal).text(address, M, cy);
+      cy += 18;
     }
-    doc.fontSize(9).font('Helvetica').fillColor(MUTED).text('Report date: ' + dateStr, M, cy);
-    cy += 30;
+    doc.fontSize(9).font('Helvetica').fillColor(C.muted).text('Report date: ' + dateStr, M, cy);
+    cy += 28;
 
-    // Estimate box
-    const EBH = 88;
-    doc.roundedRect(M, cy, INN, EBH, 6).fill(CARD2);
-    doc.rect(M, cy, 4, EBH).fill(TEAL);
-    doc.fontSize(7).font('Helvetica-Bold').fillColor(MUTED)
-       .text('ESTIMATED COST RANGE', M+14, cy+12, { characterSpacing: 1 });
-    doc.fontSize(26).font('Helvetica-Bold').fillColor(TEAL)
-       .text(`${lo} – ${hi}`, M+14, cy+26);
-    doc.fontSize(9).font('Helvetica').fillColor(MUTED)
-       .text(`${region}  ·  ${propType}  ·  ${spec} spec`, M+14, cy+66);
-    cy += EBH + 16;
+    // Estimate band
+    const EBH = 86;
+    doc.roundedRect(M, cy, INN, EBH, 6).fill(C.card2);
+    doc.rect(M, cy, 4, EBH).fill(C.teal);
+    doc.fontSize(7).font('Helvetica-Bold').fillColor(C.muted)
+       .text('ESTIMATED COST RANGE', M + 14, cy + 10, { characterSpacing: 1 });
+    doc.fontSize(26).font('Helvetica-Bold').fillColor(C.teal)
+       .text(lo + ' – ' + hi, M + 14, cy + 24);
+    doc.fontSize(9).font('Helvetica').fillColor(C.muted)
+       .text(region + '  ·  ' + propType + '  ·  ' + spec + ' spec', M + 14, cy + 62);
+    cy += EBH + 14;
 
-    // Details grid — 3 rows × 2 cols
-    const floorAreaLabel = toTitle(get(estimate,'Floor Area','floorArea'));
-    const details = isReno
-      ? [['PROPERTY TYPE', propType], ['REGION', region],
-         ['RENOVATION LEVEL', level], ['SPECIFICATION', spec],
-         ['PROPERTY AGE', age],       ['FLOOR AREA', floorAreaLabel||beds]]
-      : [['EXTENSION TYPE', level],   ['REGION', region],
-         ['SPECIFICATION', spec],     ['PROPERTY TYPE', propType],
-         ['REPORT DATE', dateStr],    ['SIZE', get(estimate,'sizeM2','SizeM2')+'m²']];
-
-    const CW = INN/2, CH = 38;
+    // Details grid — 3 rows × 2 cols, 38px tall each
+    const detailsReno = [
+      ['PROPERTY TYPE',   propType],  ['REGION',        region],
+      ['RENOVATION LEVEL',level],     ['SPECIFICATION', spec],
+      ['PROPERTY AGE',    age],       ['FLOOR AREA',    floorArea || (beds + ' bed')],
+    ];
+    const detailsExt = [
+      ['EXTENSION TYPE',  level],     ['REGION',        region],
+      ['SPECIFICATION',   spec],      ['PROPERTY TYPE', propType],
+      ['PROPERTY AGE',    age],       ['REPORT DATE',   dateStr],
+    ];
+    const details = isReno ? detailsReno : detailsExt;
+    const CW = INN / 2, CH = 38;
     for (let i = 0; i < 6; i++) {
-      const col = i%2, row = Math.floor(i/2);
-      const cx = M + col*CW, cY = cy + row*CH;
-      doc.rect(cx, cY, CW, CH).fill(CARD);
-      doc.rect(cx, cY, CW, CH).stroke(BORD);
-      doc.fontSize(6.5).font('Helvetica-Bold').fillColor(MUTED)
-         .text((details[i]||['',''])[0], cx+10, cY+6, { characterSpacing: 0.8, width: CW-20 });
-      doc.fontSize(11).font('Helvetica-Bold').fillColor(LIGHT)
-         .text((details[i]||['',''])[1], cx+10, cY+18, { width: CW-20 });
+      const col = i % 2, row = Math.floor(i / 2);
+      const cx = M + col * CW, gy = cy + row * CH;
+      doc.rect(cx, gy, CW, CH).fill(C.card);
+      doc.rect(cx, gy, CW, CH).stroke(C.bord);
+      doc.fontSize(6.5).font('Helvetica-Bold').fillColor(C.muted)
+         .text(details[i][0], cx + 10, gy + 6, { characterSpacing: 0.8, width: CW - 20 });
+      doc.fontSize(10.5).font('Helvetica-Bold').fillColor(C.light)
+         .text(details[i][1], cx + 10, gy + 18, { width: CW - 20 });
     }
-    cy += 3*CH + 14;
+    cy += 3 * CH + 14;
 
-    // Discrete data source note
-    doc.fontSize(6.5).font('Helvetica').fillColor(DIM)
-       .text('Cost benchmarks informed by publicly available data from RICS, BCIS, ONS, Rightmove, Zoopla and HM Land Registry (2025/26). Full methodology at urbanbrief.co.uk/data-sources',
+    // Data source note
+    doc.fontSize(6.5).font('Helvetica').fillColor(C.dim)
+       .text('Cost benchmarks informed by RICS, BCIS, ONS, Rightmove, Zoopla and HM Land Registry (2025/26). Full methodology at urbanbrief.co.uk/data-sources',
              M, cy, { width: INN });
 
-    // ══════════════════════════════════════════════════════════════════════
-    // PAGE 2: CONTENTS
-    // ══════════════════════════════════════════════════════════════════════
-    newSec(null, null);
-    doc.fontSize(16).font('Helvetica-Bold').fillColor(WHITE).text('Contents', M, y); y += 24;
-    rule();
-    const TOC = [['1','Executive Summary'],['2','Cost Breakdown'],['3','Risk Factors'],
-                 ['4','Hidden Costs'],['5','Contingency Guidance'],['6','Project Timeline'],
-                 ['7','Contractor Briefing Checklist'],['8','Next Steps'],
-                 ['9','Regional Market Context'],['10','Disclaimer & Data Sources']];
-    TOC.forEach(([n,t]) => tocRow(n,t));
+    // ════════════════════════════════════════════════════════════════════
+    // PAGE 2 — CONTENTS
+    // ════════════════════════════════════════════════════════════════════
+    secPage(null, null);
+    doc.fontSize(16).font('Helvetica-Bold').fillColor(C.white).text('Contents', M, y);
+    y += 24;
+    hRule();
+    const toc = [
+      ['1','Executive Summary'], ['2','Cost Breakdown'], ['3','Risk Factors'],
+      ['4','Hidden Costs'], ['5','Contingency Guidance'], ['6','Project Timeline'],
+      ['7','Contractor Briefing Checklist'], ['8','Next Steps'],
+      ['9','Regional Market Context'], ['10','Disclaimer & Data Sources'],
+    ];
+    toc.forEach(([n, t]) => tocRow(n, t));
 
-    // ══════════════════════════════════════════════════════════════════════
-    // SECTIONS 1–9
-    // ══════════════════════════════════════════════════════════════════════
-    newSec('1','Executive Summary');
-    bodyText(report.executiveSummary || '');
+    // ════════════════════════════════════════════════════════════════════
+    // SECTIONS
+    // ════════════════════════════════════════════════════════════════════
+    secPage('1', 'Executive Summary');
+    bodyTxt(report.executiveSummary || '');
 
-    newSec('2','Cost Breakdown');
-    bodyText(`All figures are 2025/26 indicative estimates exclusive of VAT. ${region} regional multiplier applied.`);
-    (report.costBreakdown||[]).forEach(r => costRow(r.item||'', r.low||'', r.high||'', r.notes||''));
+    secPage('2', 'Cost Breakdown');
+    bodyTxt('All figures are 2025/26 indicative estimates exclusive of VAT. ' + region + ' regional multiplier applied.');
+    (report.costBreakdown || []).forEach(r => costRow(r.item||'', r.low||'', r.high||'', r.notes||''));
 
-    newSec('3','Risk Factors');
-    bodyText('Risks identified based on property type, age and scope. Impact ranges use 2025/26 BCIS remediation data.');
-    (report.riskFactors||[]).forEach(r => riskRow(r.risk||'', r.likelihood||'Low', r.impact||'', r.mitigation||''));
+    secPage('3', 'Risk Factors');
+    bodyTxt('Risks identified based on property type, age and scope. Impact ranges use 2025/26 BCIS data.');
+    (report.riskFactors || []).forEach(r => riskRow(r.risk||'', r.likelihood||'Low', r.impact||'', r.mitigation||''));
 
-    newSec('4','Hidden Costs');
-    bodyText('These costs are frequently omitted from initial budgets.');
-    (report.hiddenCosts||[]).forEach(h => hiddenRow(h.item||'', h.estimate||'', h.explanation||''));
+    secPage('4', 'Hidden Costs');
+    bodyTxt('These costs are frequently omitted from initial budgets — include them from the outset.');
+    (report.hiddenCosts || []).forEach(h => hiddenRow(h.item||'', h.estimate||'', h.explanation||''));
 
-    newSec('5','Contingency Guidance');
-    bodyText(report.contingencyGuidance || '');
+    secPage('5', 'Contingency Guidance');
+    bodyTxt(report.contingencyGuidance || '');
 
-    newSec('6','Project Timeline');
-    bodyText('Indicative programme. Durations depend on contractor resource and unforeseen works.');
-    (report.projectTimeline||[]).forEach((ph,i) => tlRow(i+1, ph.phase||'', ph.duration||'', ph.description||''));
+    secPage('6', 'Project Timeline');
+    bodyTxt('Indicative programme. Durations depend on contractor resource and unforeseen works.');
+    (report.projectTimeline || []).forEach((ph, i) =>
+      tlRow(i + 1, ph.phase||'', ph.duration||'', ph.description||''));
 
-    newSec('7','Contractor Briefing Checklist');
-    bodyText('Present this checklist to all tendering contractors and include key items as contract conditions.');
-    (report.contractorChecklist||[]).forEach(item => tickItem(item));
+    secPage('7', 'Contractor Briefing Checklist');
+    bodyTxt('Present this checklist to all tendering contractors and include key items as contract conditions.');
+    (report.contractorChecklist || []).forEach(item => tickItem(item));
 
-    newSec('8','Next Steps');
-    const addrRef = address ? ` for ${address}` : '';
-    bodyText(`Recommended actions in sequence${addrRef} before committing to any contract.`);
-    (report.nextSteps||[]).forEach((s,i) => stepItem(i+1, s));
+    secPage('8', 'Next Steps');
+    bodyTxt('Recommended actions in sequence' + (address ? ' for ' + address : '') + ' before committing to any contract.');
+    (report.nextSteps || []).forEach((s, i) => stepItem(i + 1, s));
 
-    newSec('9','Regional Market Context');
-    bodyText(report.regionalContext || '');
+    secPage('9', 'Regional Market Context');
+    bodyTxt(report.regionalContext || '');
 
-    // ══════════════════════════════════════════════════════════════════════
-    // SECTION 10: DISCLAIMER & DATA SOURCES
-    // ══════════════════════════════════════════════════════════════════════
-    newSec('10','Disclaimer & Data Sources');
-    const disc = `This report provides indicative cost estimates based on publicly available 2025/26 UK construction cost data and the project details supplied. Actual costs will vary according to contractor, site conditions, specification changes, and market conditions at time of procurement. This report does not constitute professional advice. Always obtain a minimum of three competitive quotes from suitably qualified and insured contractors. UrbanBrief accepts no liability for decisions made on the basis of estimates herein. This report was prepared exclusively for ${client}${address?' at '+address:''} and should not be shared for any purpose other than initial budget planning.`;
-    bodyText(disc);
-    y += 8;
+    // ════════════════════════════════════════════════════════════════════
+    // SECTION 10 — DISCLAIMER
+    // ════════════════════════════════════════════════════════════════════
+    secPage('10', 'Disclaimer & Data Sources');
+    const disc = 'This report provides indicative cost estimates based on publicly available 2025/26 UK construction cost data and the project details supplied. Actual costs will vary according to contractor, site conditions, specification changes, and market conditions at time of procurement. This report does not constitute professional advice. Always obtain a minimum of three competitive quotes from suitably qualified and insured contractors before committing to any works. UrbanBrief accepts no liability for decisions made on the basis of estimates herein. This report was prepared exclusively for ' + client + (address ? ' at ' + address : '') + ' and should not be shared for any purpose other than initial budget planning.';
+    bodyTxt(disc);
+    y += 10;
 
-    // Data sources box
     const DS = 'Cost benchmarks informed by RICS (Royal Institution of Chartered Surveyors), BCIS (Building Cost Information Service), ONS (Office for National Statistics), Rightmove, Zoopla and HM Land Registry. All figures reference 2025/26 published indices. Full methodology: urbanbrief.co.uk/data-sources';
-    const dsH = doc.heightOfString(DS, { width: INN-24, lineGap: 2 }) + 36;
-    checkY(dsH + 10);
-    doc.roundedRect(M, y, INN, dsH, 6).fill(CARD);
-    doc.rect(M, y, 3, dsH).fill(TEAL);
-    doc.fontSize(7).font('Helvetica-Bold').fillColor(TEAL)
-       .text('DATA SOURCES', M+12, y+10, { characterSpacing: 1 });
-    doc.fontSize(8).font('Helvetica').fillColor(MUTED)
-       .text(DS, M+12, y+24, { width: INN-22, lineGap: 2 });
+    doc.fontSize(8.5).font('Helvetica').fillColor(C.muted);
+    const dsH = doc.heightOfString(DS, { width: INN - 24, lineGap: 2 }) + 36;
+    needY(dsH + 10);
+    doc.roundedRect(M, y, INN, dsH, 6).fill(C.card);
+    doc.rect(M, y, 3, dsH).fill(C.teal);
+    doc.fontSize(7).font('Helvetica-Bold').fillColor(C.teal)
+       .text('DATA SOURCES', M + 12, y + 10, { characterSpacing: 1 });
+    doc.fontSize(8).font('Helvetica').fillColor(C.muted)
+       .text(DS, M + 12, y + 24, { width: INN - 22, lineGap: 2 });
     y += dsH + 10;
 
-    // Sign-off line
-    doc.rect(M, y, INN, 0.5).fill(BORD); y += 8;
-    doc.fontSize(10).font('Helvetica-Bold').fillColor(TEAL).text('UrbanBrief', M, y);
-    doc.fontSize(8).font('Helvetica').fillColor(MUTED)
-       .text('urbanbrief.co.uk  ·  enquiries@urbanbrief.co.uk', M, y+1, { width: INN, align: 'right' });
+    needY(28);
+    doc.rect(M, y, INN, 0.5).fill(C.bord);
+    y += 8;
+    doc.fontSize(10).font('Helvetica-Bold').fillColor(C.teal).text('UrbanBrief', M, y);
+    doc.fontSize(8).font('Helvetica').fillColor(C.muted)
+       .text('urbanbrief.co.uk  ·  enquiries@urbanbrief.co.uk', M, y + 1, { width: INN, align: 'right' });
 
     doc.end();
   });

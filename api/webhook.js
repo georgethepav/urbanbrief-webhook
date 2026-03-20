@@ -48,10 +48,14 @@ export default async function handler(req, res) {
 
   console.log('Processing paid report for:', email);
 
-  // Do all the work then respond — Vercel cancels async work after res.send()
+  // Respond to Stripe immediately — must be within ~30s or Stripe retries
+  res.status(200).json({ received: true });
+
+  // Do the heavy work after responding — res.end() does NOT kill the Node process,
+  // the Vercel function stays alive until all async work completes (up to maxDuration)
   try {
     const { estimate, extra } = await lookupBuyerData(email);
-    if (!estimate) return res.status(200).json({ received: true, error: 'no estimate found' });
+    if (!estimate) { console.error('No estimate found for:', email); return; }
 
     const tool = (estimate['Tool'] || estimate['tool'] || 'renovation').toLowerCase();
     const reportContent = await generateReport(estimate, extra, tool);
@@ -60,10 +64,9 @@ export default async function handler(req, res) {
     await markAsPaid(email);
 
     console.log('Report sent to:', email);
-    return res.status(200).json({ success: true });
   } catch (err) {
     console.error('Report generation failed for', email, ':', err.message);
-    return res.status(200).json({ received: true, error: err.message });
+    // Response already sent — just log the error
   }
 }
 

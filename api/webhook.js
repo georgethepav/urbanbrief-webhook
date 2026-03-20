@@ -166,6 +166,9 @@ async function generateReport(estimate, extra, tool) {
   const rawHigh  = get(estimate, 'Estimate High', 'estimateHigh');
   const estLow   = fmtPound(rawLow);
   const estHigh  = fmtPound(rawHigh);
+  const houseNo  = get(extra||{}, 'houseNo', 'House No/Name', 'houseno');
+  const postcode = get(extra||{}, 'postcode', 'Postcode');
+  const address  = [houseNo, postcode].filter(p => p && p !== '—').join(', ');
 
   const extraLines = [];
   if (extra) {
@@ -175,28 +178,99 @@ async function generateReport(estimate, extra, tool) {
     keys.forEach(k => { const v = get(extra, k); if (v) extraLines.push(`${k}: ${v}`); });
   }
 
+  const systemPrompt = `You are a Principal Designer and cost consultant specialising in UK residential renovation and extension projects. You write detailed, specific, professional Intelligence Reports in British English. Your reports are used by homeowners to plan and budget major projects — they must be accurate, thorough and actionable. Never use generic filler text. Always reference the specific property type, age, region and specification provided. Use 2025/26 as the reference year for all cost data and market commentary.`;
+
+  const projectSummary = isReno
+    ? `PROJECT TYPE: Full Renovation
+Property: ${propType} | Bedrooms: ${beds} | Floor area: ${floorArea} | Age: ${age}
+Region: ${region} | Scope: ${level} | Specification: ${spec}
+Estimate: ${estLow} – ${estHigh}
+Address: ${address || 'Not provided'}
+Extra details: ${extraLines.length ? extraLines.join(' | ') : 'None provided'}`
+    : `PROJECT TYPE: Extension
+Property: ${propType} | Extension type: ${level} | Specification: ${spec}
+Region: ${region}
+Estimate: ${estLow} – ${estHigh}
+Address: ${address || 'Not provided'}
+Extra details: ${extraLines.length ? extraLines.join(' | ') : 'None provided'}`;
+
+  const userPrompt = `Generate a full Intelligence Report for the project below. Output ONLY valid JSON — no markdown, no backticks, no preamble.
+
+${projectSummary}
+
+QUALITY REQUIREMENTS — every section must meet these standards:
+
+EXECUTIVE SUMMARY (4 paragraphs):
+- Para 1: Introduce the specific project — reference the property type, age, region, floor area, scope and specification. State the estimate range and what it covers.
+- Para 2: Comment on the structural characteristics and risk profile typical of this property age/type. Be specific — e.g. cavity wall vs solid wall, timber floors, roof type, services age.
+- Para 3: Reference the regional construction market — tender price inflation, contractor availability, lead times in this region for 2025/26.
+- Para 4: If a postcode/address was provided, include a brief note on the local property market context and how renovation/extension investment performs in that area.
+
+COST BREAKDOWN (6-8 items):
+- Each item must have a descriptive "notes" field explaining: what is included, the cost basis (e.g. BCIS 2025/26 index, rate per m²), and any key assumptions.
+- Include base works, kitchen (if applicable), bathrooms (if applicable), any structural items, contingency, and a total inc. contingency line.
+- Low and high values must be specific £ figures consistent with the estimate range provided.
+
+RISK FACTORS (4-5 items):
+- Each risk must be specific to THIS property's age, type and scope — not generic.
+- "impact" field: give a specific £ range e.g. "£2,500–£6,000"
+- "mitigation" field: 2-3 sentences of specific, actionable advice referencing the property type and age.
+- likelihood: "High", "Medium" or "Low" only.
+
+HIDDEN COSTS (5-6 items):
+- Each must have a specific £ estimate range and a 2-3 sentence explanation with practical guidance.
+- Must include: VAT, professional fees, temporary accommodation (if applicable), party wall (if applicable), building regulations, waste disposal.
+
+CONTINGENCY GUIDANCE (1 field, 3-4 paragraphs):
+- Para 1: State the recommended % and total £ range based on the actual estimate figures.
+- Para 2: Split into general contingency and services contingency with specific £ figures for each.
+- Para 3: Reference the highest single risk item for this specific property age and explain its cost range.
+- Para 4: Practical advice on how to hold and release contingency during the project.
+
+PROJECT TIMELINE (6 phases):
+- Each phase must have a realistic duration and a "description" of 2-3 sentences covering what specifically happens in that phase for this project type and scope.
+- Phases: pre-works/procurement, strip-out, structural/first-fix services, second-fix/plastering, finishes/fit-out, commissioning/snagging.
+
+CONTRACTOR CHECKLIST (8-10 items):
+- Specific to the project scope and specification level. Include insurance levels appropriate to the project value.
+
+NEXT STEPS (6 items):
+- Specific, actionable steps in sequence. Reference the property address if provided. Include UrbanBrief contact as final step.
+
+REGIONAL CONTEXT (3 paragraphs):
+- Para 1: Tender price inflation and market conditions in this specific region for 2025/26 with % figures.
+- Para 2: Material cost trends relevant to this scope.
+- Para 3: Labour market conditions and any specific local factors affecting this project.
+
+Return this exact JSON structure:
+{
+  "executiveSummary": "4 paragraphs separated by newlines",
+  "costBreakdown": [{"item": "", "low": "£XX,000", "high": "£XX,000", "notes": "2-3 sentence explanation"}],
+  "riskFactors": [{"risk": "", "likelihood": "High/Medium/Low", "impact": "£X,000–£X,000", "mitigation": "2-3 sentences"}],
+  "hiddenCosts": [{"item": "", "estimate": "£X,000–£X,000", "explanation": "2-3 sentences"}],
+  "contingencyGuidance": "3-4 paragraphs separated by newlines",
+  "projectTimeline": [{"phase": "", "duration": "X–X weeks", "description": "2-3 sentences"}],
+  "contractorChecklist": ["full sentence item"],
+  "nextSteps": ["full sentence step"],
+  "regionalContext": "3 paragraphs separated by newlines"
+}`;
+
   const response = await openai.chat.completions.create({
     model: 'gpt-4o',
     messages: [
-      { role: 'system', content: 'You are a Principal Designer specialising in UK residential renovation and extension projects. Write specific, actionable, professional Intelligence Reports in British English.' },
-      { role: 'user', content: `Generate a full Intelligence Report. Output ONLY valid JSON — no markdown, no backticks.
-
-PROJECT: ${isReno ? 'Renovation' : 'Extension'} | Region: ${region} | Property: ${propType} | Scope: ${level} | Spec: ${spec} | Estimate: ${estLow} – ${estHigh}
-${isReno ? `Bedrooms: ${beds} | Age: ${age} | Floor area: ${floorArea}` : ''}
-EXTRA DETAILS: ${extraLines.length ? extraLines.join(' | ') : 'None provided'}
-
-Return this JSON:
-{"executiveSummary":"3-4 paragraphs","costBreakdown":[{"item":"","low":"£XX,000","high":"£XX,000","notes":""}],"regionalContext":"2-3 paragraphs","riskFactors":[{"risk":"","likelihood":"Low/Medium/High","impact":"£X,000","mitigation":""}],"hiddenCosts":[{"item":"","estimate":"£X,000","explanation":""}],"contingencyGuidance":"paragraph with worked example","projectTimeline":[{"phase":"","duration":"X weeks","description":""}],"contractorChecklist":["item"],"nextSteps":["item"]}` }
+      { role: 'system', content: systemPrompt },
+      { role: 'user',   content: userPrompt },
     ],
-    temperature: 0.4,
-    max_tokens: 4000,
+    temperature: 0.35,
+    max_tokens: 6000,
   });
 
   const raw = response.choices[0].message.content.trim()
-    .replace(/^```json\n?/, '').replace(/\n?```$/, '').trim();
+    .replace(/^```json
+?/, '').replace(/
+?```$/, '').trim();
   return JSON.parse(raw);
 }
-
 
 
 // ── PDF ────────────────────────────────────────────────────────────────────────
@@ -322,12 +396,16 @@ async function generatePDF(report, estimate, tool, extra) {
 
     function bodyTxt(text) {
       if (!text) return;
-      const t = String(text).replace(/(\b2025\b)(?!\/)/g, '2025/26');
-      doc.fontSize(9.5).font('Helvetica').fillColor(C.muted);
-      const h = doc.heightOfString(t, { width: INN, lineGap: 3 });
-      needY(h + 8);
-      doc.text(t, M, y, { width: INN, lineGap: 3 });
-      y += h + 8;
+      // Split on double newlines or single newlines for multi-paragraph content
+      const paras = String(text).split(/\n\n|\n/).map(p => p.trim()).filter(Boolean);
+      paras.forEach((para, i) => {
+        const t = para.replace(/(\b2025\b)(?!\/)/g, '2025/26');
+        doc.fontSize(9.5).font('Helvetica').fillColor(C.muted);
+        const h = doc.heightOfString(t, { width: INN, lineGap: 3 });
+        needY(h + 8);
+        doc.text(t, M, y, { width: INN, lineGap: 3 });
+        y += h + (i < paras.length - 1 ? 10 : 8); // extra gap between paragraphs
+      });
     }
 
     function hRule() {

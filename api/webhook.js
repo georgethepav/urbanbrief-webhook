@@ -3,13 +3,15 @@
 // Uses Apps Script for data lookup — no Google Cloud needed
 // ================================================================
 
-const stripe  = require('stripe')(process.env.STRIPE_SECRET_KEY);
-const { Resend } = require('resend');
-const OpenAI  = require('openai');
-const PDFDocument = require('pdfkit');
+import Stripe from 'stripe';
+import { Resend } from 'resend';
+import OpenAI from 'openai';
+import PDFDocument from 'pdfkit';
+import getRawBody from 'raw-body';
 
-const resend = new Resend(process.env.RESEND_API_KEY);
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const stripe  = new Stripe(process.env.STRIPE_SECRET_KEY);
+const resend  = new Resend(process.env.RESEND_API_KEY);
+const openai  = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });

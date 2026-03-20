@@ -267,10 +267,7 @@ Return this exact JSON structure:
     max_tokens: 6000,
   });
 
-  const raw = response.choices[0].message.content.trim()
-    .replace(/^```json
-?/, '').replace(/
-?```$/, '').trim();
+  const raw = response.choices[0].message.content.trim().replace(/^```json\n?/, '').replace(/\n?```$/, '').trim();
   return JSON.parse(raw);
 }
 
@@ -692,11 +689,3 @@ async function sendReportEmail(email, pdfBuffer, tool, report, estimate) {
 
 // ── HELPER ────────────────────────────────────────────────────
 
-function getRawBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    req.on('data', c => chunks.push(c));
-    req.on('end',  () => resolve(Buffer.concat(chunks)));
-    req.on('error', reject);
-  });
-}

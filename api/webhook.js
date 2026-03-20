@@ -35,26 +35,23 @@ export default async function handler(req, res) {
 
   const email = session.customer_details?.email;
   if (!email) return res.status(200).json({ received: true, error: 'no email' });
-  // Idempotency — prevent double-processing same payment
+  // Idempotency — prevent double-processing same payment within 5 min window
   const piId = session.payment_intent || session.id;
-  if (global._processed && global._processed.has(piId)) {
+  const now = Date.now();
+  if (!global._processed) global._processed = new Map();
+  const lastSeen = global._processed.get(piId);
+  if (lastSeen && (now - lastSeen) < 300000) {
     console.log('Duplicate webhook skipped:', piId);
     return res.status(200).json({ received: true, skipped: 'duplicate' });
   }
-  if (!global._processed) global._processed = new Set();
-  global._processed.add(piId);
+  global._processed.set(piId, now);
 
   console.log('Processing paid report for:', email);
 
-  // ── Respond to Stripe IMMEDIATELY to prevent retries ──
-  // Stripe retries if it doesn't get a 200 within ~30s.
-  // We do the heavy work (OpenAI + PDF + email) asynchronously after responding.
-  res.status(200).json({ received: true, processing: true });
-
-  // Now do the work — any errors are logged but don't affect the Stripe response
+  // Do all the work then respond — Vercel cancels async work after res.send()
   try {
     const { estimate, extra } = await lookupBuyerData(email);
-    if (!estimate) { console.error('No estimate found for:', email); return; }
+    if (!estimate) return res.status(200).json({ received: true, error: 'no estimate found' });
 
     const tool = (estimate['Tool'] || estimate['tool'] || 'renovation').toLowerCase();
     const reportContent = await generateReport(estimate, extra, tool);
@@ -63,9 +60,10 @@ export default async function handler(req, res) {
     await markAsPaid(email);
 
     console.log('Report sent to:', email);
+    return res.status(200).json({ success: true });
   } catch (err) {
     console.error('Report generation failed for', email, ':', err.message);
-    // Already sent 200 to Stripe above — do not send another response
+    return res.status(200).json({ received: true, error: err.message });
   }
 }
 

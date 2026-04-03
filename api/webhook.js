@@ -50,10 +50,11 @@ export default async function handler(req, res) {
 
   console.log('Processing paid report for:', email);
 
-  // Respond to Stripe immediately — must be within ~30s or Stripe retries
-  res.status(200).json({ received: true });
-
-  // Do the heavy work after responding
+  // Do all heavy work FIRST, then respond.
+  // Vercel terminates the function as soon as res.end() is called — any async
+  // work scheduled after res.json() will never run. maxDuration:60 in vercel.json
+  // gives us plenty of headroom; Stripe waits up to 30s for a response and
+  // OpenAI + PDF + email typically completes in 15-25s.
   try {
     const { estimate, extra, flip } = await lookupBuyerData(email);
 
@@ -78,7 +79,10 @@ export default async function handler(req, res) {
     console.log('Report sent to:', email);
   } catch (err) {
     console.error('Report generation failed for', email, ':', err.message);
+    return res.status(200).json({ received: true, error: err.message });
   }
+
+  return res.status(200).json({ received: true });
 }
 
 // ── APPS SCRIPT CALLS ─────────────────────────────────────────

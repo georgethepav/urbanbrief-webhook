@@ -58,14 +58,30 @@ export default async function handler(req, res) {
   try {
     const { estimate, extra, flip } = await lookupBuyerData(email);
 
+    // Debug: log the raw flip object to verify GAS is returning correct field names
+    if (flip) {
+      const flipKeys = Object.keys(flip).slice(0, 8);
+      console.log('GAS flip keys sample:', JSON.stringify(flipKeys));
+      console.log('flip.purchasePrice:', flip.purchasePrice, '| flip.salePrice:', flip.salePrice, '| flip.email:', flip.email);
+    }
+
+    // Validate flip data has real camelCase fields — guards against broken GAS response
+    // where Flip Reports sheet is missing its header row (keys become a previous row's values)
+    const flipIsValid = flip &&
+      (flip.purchasePrice !== undefined || flip.salePrice !== undefined ||
+       flip.postcode !== undefined || flip.email !== undefined);
+
     let tool, reportContent, pdfEstimate;
 
-    if (flip) {
-      // Flip report takes priority if a flip row exists for this email
+    if (flipIsValid) {
+      // Flip report takes priority if a valid flip row exists for this email
       tool = 'flip';
       reportContent = await generateFlipReport(flip);
       pdfEstimate = flip;
     } else {
+      if (flip && !flipIsValid) {
+        console.error('Flip data malformed — GAS Flip Reports sheet likely missing header row. Keys received:', JSON.stringify(Object.keys(flip).slice(0, 5)));
+      }
       if (!estimate) { console.error('No estimate found for:', email); return; }
       tool = (estimate['Tool'] || estimate['tool'] || 'renovation').toLowerCase();
       reportContent = await generateReport(estimate, extra, tool);
